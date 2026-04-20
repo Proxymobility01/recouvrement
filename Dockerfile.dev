@@ -1,0 +1,33 @@
+FROM python:3.14.3-trixie
+
+# Empêche Python d'écrire des fichiers .pyc sur le disque
+ENV PYTHONDONTWRITEBYTECODE=1
+# Empêche Python de bufferiser les sorties standard
+ENV PYTHONUNBUFFERED=1
+
+WORKDIR /home/django
+
+# Installation de netcat pour que l'entrypoint puisse tester la connexion DB
+RUN apt-get update && apt-get install -y netcat-openbsd && rm -rf /var/lib/apt/lists/*
+
+# Création de l'utilisateur
+RUN useradd -m django
+
+# Installation des dépendances
+COPY requirements.txt .
+RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
+
+# On copie TOUT le code source en une seule fois
+COPY . .
+
+# On rend l'entrypoint exécutable ET on donne la propriété à 'django'
+RUN chmod +x /home/django/entrypoint.sh && \
+    chown -R django:django /home/django
+
+# On bascule sur l'utilisateur sécurisé
+USER django
+
+EXPOSE 8000
+
+# Définition de l'entrypoint
+ENTRYPOINT ["/home/django/entrypoint.sh"]

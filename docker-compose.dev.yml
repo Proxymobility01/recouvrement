@@ -1,0 +1,68 @@
+services:
+
+  db:
+    image: timescale/timescaledb-ha:pg15
+    restart: always
+    container_name: recouvrement_db
+    environment:
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+      - POSTGRES_USER=${DB_USER}
+      - POSTGRES_DB=${DB_NAME}
+    ports:
+      - "5433:5432"
+    volumes:
+      - type: volume
+        source: recouvrement_data
+        target: /home/postgres/pgdata/data
+    networks:
+      - recouvrement_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    image: recouvrement_api:latest
+    restart: always
+    container_name: recouvrement_backend
+    command: python manage.py runserver 0.0.0.0:8000
+    volumes:
+      - ./:/home/django
+    networks:
+      - recouvrement_network
+    ports:
+      - "8001:8000"
+    environment:
+      - DB_HOST=db
+      - DB_NAME=${DB_NAME}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_PORT=5432
+      - RUN_MIGRATIONS=${RUN_MIGRATIONS}
+      - INIT_ROLES=${INIT_ROLES}
+      - COLLECT_STATIC=${COLLECT_STATIC}
+      - INIT_SYSTEM=${INIT_SYSTEM}
+      - SUPER_ADMIN_USERNAME=${SUPER_ADMIN_USERNAME}
+      - SUPER_ADMIN_EMAIL=${SUPER_ADMIN_EMAIL}
+      - SUPER_ADMIN_TEL=${SUPER_ADMIN_TEL}
+      - SUPER_ADMIN_NOM=${SUPER_ADMIN_NOM}
+      - SUPER_ADMIN_PRENOM=${SUPER_ADMIN_PRENOM}
+      - SUPER_ADMIN_PASSWORD=${SUPER_ADMIN_PASSWORD}
+      - SYSTEM_DOMAIN=${SYSTEM_DOMAIN}
+      - PAYMENT_WEBHOOK_SECRET=${PAYMENT_WEBHOOK_SECRET}
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  recouvrement_data:
+    name: recouvrement_data
+
+networks:
+  recouvrement_network:
+    name: recouvrement_network
+    driver: bridge

@@ -1,0 +1,25 @@
+# Fichiers d'environnement (LE PLUS IMPORTANT)
+.env
+.env.*
+
+# Git
+.git
+.gitignore
+
+# Fichiers générés par Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Dossiers d'environnement virtuel (si tu en as un en local)
+venv/
+env/
+.venv/
+
+# Base de données locale SQLite (si tu l'utilises en dev)
+db.sqlite3
+
+# Fichiers de l'éditeur de code
+.vscode/
+.idea/
