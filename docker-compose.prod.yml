@@ -1,0 +1,52 @@
+services:
+  db:
+    image: timescale/timescaledb-ha:pg15
+    restart: always
+    container_name: recouvrement_db_prod
+    env_file:
+      - .env
+    volumes:
+      - recouvrement_db_data:/home/postgres/pgdata/data
+    networks:
+      - recouvrement_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+    image: recouvrement_api_prod:latest
+    restart: always
+    container_name: recouvrement_backend_prod
+    command: gunicorn config.wsgi:application -c gunicorn.conf.py
+    env_file:
+      - .env
+    environment:
+      - RUN_MIGRATIONS=True
+      - COLLECT_STATIC=True
+      - INIT_ROLES=False
+      - INIT_SYSTEM=False
+    ports:
+      - "127.0.0.1:9100:8000"
+    volumes:
+      - /home/ubuntu/recouvrement/config/staticfiles/:/home/django/config/staticfiles
+    networks:
+      - recouvrement_network
+    depends_on:
+      db:
+        condition: service_healthy
+
+
+volumes:
+  recouvrement_db_data:
+    external: true
+
+
+networks:
+  recouvrement_network:
+    name: recouvrement_network
+    driver: bridge

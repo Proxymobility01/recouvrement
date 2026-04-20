@@ -50,13 +50,13 @@ fi
 if [ "$INIT_SYSTEM" = "True" ]; then
     echo "Initialisation du compte système et du superadmin..."
     python manage.py init_system \
-        --username "${SUPER_ADMIN_USERNAME}" \
-        --email    "${SUPER_ADMIN_EMAIL}" \
-        --tel      "${SUPER_ADMIN_TEL}" \
-        --nom      "${SUPER_ADMIN_NOM}" \
-        --prenom "${SUPER_ADMIN_PRENOM}" \
-        --password "${SUPER_ADMIN_PASSWORD}" \
-        --domaine  "${SYSTEM_DOMAIN}"
+        --keycloak_id "${SUPER_ADMIN_KEYCLOAK_ID}" \
+        --compte_id   "${SYSTEM_COMPTE_ID}" \
+        --email       "${SUPER_ADMIN_EMAIL}" \
+        --tel         "${SUPER_ADMIN_TEL}" \
+        --nom         "${SUPER_ADMIN_NOM}" \
+        --prenom      "${SUPER_ADMIN_PRENOM}" \
+        --password    "${SUPER_ADMIN_PASSWORD}"
 
     if [ $? -ne 0 ]; then
         echo "❌ Échec de init_system — arrêt du démarrage"

@@ -1,0 +1,65 @@
+# ==========================================
+# STAGE 1 : BUILDER (Compilation)
+# ==========================================
+FROM python:3.14.3-slim-trixie as builder
+
+WORKDIR /usr/src/app
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+# Installation des dépendances de compilation (gcc, libpq pour PostgreSQL)
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends gcc libpq-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+
+# Création des wheels (paquets pré-compilés)
+RUN pip wheel --no-cache-dir --no-deps --wheel-dir /usr/src/app/wheels -r requirements.txt
+
+# ==========================================
+# STAGE 2 : FINAL (Production sécurisée)
+# ==========================================
+FROM python:3.14.3-slim-trixie
+
+WORKDIR /home/django
+
+# Création de l'utilisateur non-root (Sécurité)
+RUN useradd -m -d /home/django django
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+# Installation des paquets système minimaux requis pour l'exécution
+# On inclut libpq5 pour psycopg2 (PostgreSQL) et netcat pour l'entrypoint
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends netcat-openbsd libpq5 && \
+    rm -rf /var/lib/apt/lists/*
+
+# Récupération des roues depuis le builder
+COPY --from=builder /usr/src/app/wheels /wheels
+COPY --from=builder /usr/src/app/requirements.txt .
+
+# Installation sans recompilation
+RUN pip install --no-cache /wheels/*
+
+# Copie du code source dans l'image (Plus de volumes locaux !)
+COPY . .
+
+# Préparation de l'entrypoint
+RUN sed -i 's/\r$//g' /home/django/entrypoint.sh && \
+    chmod +x /home/django/entrypoint.sh
+
+# Création des dossiers pour les fichiers statiques et médias
+RUN mkdir -p /home/django/staticfiles /home/django/media && \
+    chown -R django:django /home/django
+
+# Changement d'utilisateur
+USER django
+
+EXPOSE 8000
+
+# Lancement (Utilise la config Gunicorn optimisée)
+ENTRYPOINT ["/home/django/entrypoint.sh"]
+CMD ["gunicorn", "config.wsgi:application", "-c", "gunicorn.conf.py"]
