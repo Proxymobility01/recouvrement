@@ -26,7 +26,9 @@ static/
 .env.*
 secrets.json
 *.key
-
+.python_history
+.gunicorn
+.bash_history
 # --- Tests & Qualité ---
 .pytest_cache/
 .coverage
