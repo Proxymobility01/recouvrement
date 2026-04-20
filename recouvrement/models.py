@@ -1,6 +1,10 @@
+import random
+import string
 from decimal import Decimal
 from django.core.validators import MinValueValidator
 from django.db import models
+from django.utils import timezone
+
 from accounts.models import BaseModel, CustomUser
 
 
@@ -14,6 +18,16 @@ class Contrat(BaseModel):
     STATUT_SUSPENDU = 'SUSPENDU'
     STATUT_SOLDE = 'SOLDE'
     STATUT_CONTENTIEUX = 'CONTENTIEUX'
+
+    JOURNALIER = 'JOURNALIER'
+    HEBDOMADAIRE = 'HEBDOMADAIRE'
+    MENSUEL = 'MENSUEL'
+
+    FREQUENCE_CHOICES = [
+        (JOURNALIER, 'Journalier'),
+        (HEBDOMADAIRE, 'Hebdomadaire'),
+        (MENSUEL, 'Mensuel (Par mois)'),
+    ]
 
     STATUT_CHOICES = [
         (STATUT_ACTIF, 'Actif'),
@@ -46,7 +60,7 @@ class Contrat(BaseModel):
     montant_restant = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     montant_par_paiement = models.DecimalField(max_digits=12, decimal_places=2)
 
-    frequence = models.CharField(max_length=50)
+    frequence = models.CharField(max_length=50,choices=FREQUENCE_CHOICES, default=JOURNALIER)
     date_debut = models.DateField()
     date_fin = models.DateField(null=True, blank=True)
     prochaine_echeance = models.DateField(db_index=True)
@@ -104,6 +118,28 @@ class Lease(BaseModel):
 
 
 class Paiement(BaseModel):
+
+    @classmethod
+    def generer_reference_paiement(cls, methode):
+        """
+        Génère une référence unique d'audit au format: PREFIX.YYYYMMDD.HHMM.RANDOM
+        Exemple Mobile : MOB.20260420.1107.A1B2C3
+        Exemple Espèces : ESP.20260420.1107.X9Y8Z7
+        """
+        # Choix dynamique du préfixe
+        prefix = "ESP" if methode == cls.METHODE_ESPECES else "MOB"
+
+        now = timezone.now()
+        date_str = now.strftime("%Y%m%d")
+        heure_str = now.strftime("%H%M")
+
+        # Génère 6 caractères alphanumériques aléatoires (majuscules + chiffres)
+        chars = string.ascii_uppercase + string.digits
+        random_suffix = ''.join(random.choice(chars) for _ in range(6))
+
+        return f"{prefix}.{date_str}.{heure_str}.{random_suffix}"
+
+
     # --- Constantes de Méthode ---
     METHODE_MOBILE_MONEY = 'MOBILE_MONEY'
     METHODE_ESPECES = 'ESPECES'

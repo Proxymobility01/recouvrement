@@ -1,11 +1,8 @@
 import requests
-import string
-import random
 import logging
-from datetime import datetime
 from django.conf import settings
 from core.exceptions import CustomAPIException
-from core.errors import ErrorCodes
+
 
 logger = logging.getLogger(__name__)
 
@@ -15,24 +12,6 @@ class MobilePaymentService:
     Service dédié à l'intégration avec la passerelle de paiement Mobile Money.
     Gère la création des sessions de checkout (redirection vers la page de paiement).
     """
-
-    @classmethod
-    def generer_reference_paiement(cls):
-        """
-        Génère une référence unique d'audit au format: PR.YYYYMMDD.HHMM.RANDOM
-        Exemple: PR.20260420.1107.A1B2C3
-        """
-        prefix = "PR"
-        now = datetime.now()
-        date_str = now.strftime("%Y%m%d")
-        heure_str = now.strftime("%H%M")
-
-        # Génère 6 caractères alphanumériques aléatoires (majuscules + chiffres)
-        chars = string.ascii_uppercase + string.digits
-        random_suffix = ''.join(random.choice(chars) for _ in range(6))
-
-        return f"{prefix}.{date_str}.{heure_str}.{random_suffix}"
-
     @classmethod
     def _get_headers(cls):
         """Récupère et sécurise les en-têtes HTTP requis par le fournisseur."""

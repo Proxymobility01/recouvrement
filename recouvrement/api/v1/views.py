@@ -10,7 +10,8 @@ from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
-from rest_framework import filters, status, settings
+from rest_framework import filters, status, settings, viewsets
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.permissions import IsAuthenticated, DjangoModelPermissions, AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -18,7 +19,7 @@ from rest_framework.views import APIView
 from core.views import TenantModelViewSet
 from core.exceptions import CustomAPIException
 from core.errors import ErrorCodes
-from .serializers import ContratSerializer, LeaseSerializer, InitiationPaiementSerializer
+from .serializers import ContratSerializer, LeaseSerializer, InitiationPaiementSerializer, PaiementSerializer
 from ...models import Contrat, Paiement, Lease
 from ...services import MobilePaymentService
 
@@ -241,3 +242,56 @@ class MobilePaymentWebhookView(APIView):
 
         # 6. Acquittement (Code 200 pour stopper les retrys du fournisseur)
         return Response({"status": "Webhook acknowledged"}, status=200)
+
+
+class PaiementViewSet(TenantModelViewSet):
+    """
+    API dédiée à l'enregistrement des paiements en ESPÈCES par les partenaires.
+    """
+    serializer_class = PaiementSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        """
+        On ne liste que les paiements en espèces de l'entreprise de l'utilisateur.
+        """
+        user = self.request.user
+        # On filtre par compte_id (Multi-tenant) et par méthode ESPECES
+        queryset = Paiement.objects.filter(
+            compte_id=user.compte_id,
+        ).select_related('utilisateur', 'contrat', 'lease')
+
+        # Si ce n'est pas un admin ou un partenaire avec vue globale,
+        # (sécurité supplémentaire au cas où un chauffeur accède à cette route)
+        if not (user.is_staff or user.has_perm('recouvrement.view_all_paiements')):
+            queryset = queryset.filter(contrat__chauffeur=user)
+
+        return queryset
+
+    def create(self, request, *args, **kwargs):
+        """
+        Création simplifiée : le Serializer s'occupe de tout le travail lourd.
+        """
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        # Le .save() déclenche le create() du serializer qui :
+        # 1. Force la méthode ESPECES
+        # 2. Valide immédiatement le paiement
+        # 3. Met à jour le montant restant du contrat et du lease
+        serializer.save()
+
+        # Réponse de succès standardisée pour les espèces
+        headers = self.get_success_headers(serializer.data)
+        return Response({
+            "success": True,
+            "message": "Le paiement en espèces a été enregistré et validé avec succès.",
+            "data": serializer.data
+        }, status=status.HTTP_201_CREATED, headers=headers)
+
+    def perform_destroy(self, instance):
+        """
+        Optionnel : Si tu veux interdire la suppression pure et simple.
+        """
+        # On peut imaginer une règle métier qui interdit de supprimer un paiement validé
+        raise PermissionDenied("Un paiement validé ne peut pas être supprimé. Utilisez une annulation.")
