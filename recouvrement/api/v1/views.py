@@ -3,23 +3,27 @@ import hashlib
 import hmac
 import json
 import logging
-import os
-from datetime import timedelta
+from collections import defaultdict
+from decimal import Decimal
 
+from django.conf import settings
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
-from rest_framework import filters, status, settings, viewsets
+from rest_framework import filters, status
+from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.permissions import IsAuthenticated, DjangoModelPermissions, AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+
 from core.views import TenantModelViewSet
 from core.exceptions import CustomAPIException
 from core.errors import ErrorCodes
-from .serializers import ContratSerializer, LeaseSerializer, InitiationPaiementSerializer, PaiementSerializer
+from .serializers import ContratSerializer, LeaseSerializer, InitiationPaiementSerializer, PaiementSerializer, \
+    CalendrierSerializer
 from ...models import Contrat, Paiement, Lease
 from ...services import MobilePaymentService
 
@@ -96,6 +100,59 @@ class LeaseViewSet(TenantModelViewSet):
         # 3. Un chauffeur ne voit que ses propres échéances
         return qs.filter(contrat__chauffeur=user)
 
+    @action(detail=False, methods=['get'], url_path='calendrier')
+    def calendrier(self, request):
+        # 1. Requête optimisée
+        qs = self.get_queryset().select_related('contrat', 'contrat__chauffeur')
+
+        mois = request.query_params.get('mois')
+        annee = request.query_params.get('annee')
+        chauffeur_id = request.query_params.get('chauffeur_id')
+
+        if mois and annee:
+            try:
+                qs = qs.filter(date_echeance__year=int(annee), date_echeance__month=int(mois))
+            except ValueError:
+                return Response({"error": "Date invalide."}, status=400)
+
+        if chauffeur_id:
+            qs = qs.filter(contrat__chauffeur_id=chauffeur_id)
+
+        # 2. On trie tout par date chronologique pour que les tableaux finaux soient dans le bon ordre
+        leases = qs.order_by('date_echeance')
+
+        # 3. On sérialise toutes les données d'un seul coup
+        leases_data = CalendrierSerializer(leases, many=True).data
+
+        # 4. Regroupement intelligent en Python
+        # defaultdict crée automatiquement la structure si le chauffeur n'existe pas encore dans le dict
+        groupement = defaultdict(lambda: {"payees": [], "impayees": []})
+
+        for item in leases_data:
+            # On retire (pop) le nom du chauffeur de l'objet, car on va l'utiliser comme titre du groupe
+            nom_chauffeur = item.pop('chauffeur_nom', 'Inconnu')
+
+            # On range l'échéance dans le bon tiroir
+            if item['statut'] == Lease.STATUT_PAYE:
+                groupement[nom_chauffeur]["payees"].append(item)
+            else:
+                groupement[nom_chauffeur]["impayees"].append(item)
+
+        # 5. Transformation en tableau propre pour le Front-End
+        resultat_final = [
+            {
+                "chauffeur_nom": nom,
+                "payees": donnees["payees"],
+                "impayees": donnees["impayees"]
+            }
+            for nom, donnees in groupement.items()
+        ]
+
+        # Optionnel : Trier alphabétiquement par nom de chauffeur pour un affichage plus joli
+        resultat_final.sort(key=lambda x: x["chauffeur_nom"])
+
+        return Response(resultat_final)
+
 
 class InitiationPaiementView(APIView):
     """
@@ -163,138 +220,109 @@ class InitiationPaiementView(APIView):
 
 
 class MobilePaymentWebhookView(APIView):
-    """
-    Endpoint public destiné à recevoir les notifications du fournisseur de paiement.
-    URL: POST /api/v1/webhook/paiement/
-    """
-    # Désactive l'authentification Keycloak pour cet endpoint (communication Server-to-Server)
     permission_classes = [AllowAny]
 
     def post(self, request, *args, **kwargs):
-        # 1. Récupération de la signature et des données brutes
         signature_recue = request.headers.get('X-Signature')
         body_brut = request.body
 
         if not signature_recue:
-            logger.warning("[Webhook] Requête rejetée : Signature manquante.")
             return Response({"error": "Missing signature"}, status=400)
 
-        # 2. Vérification cryptographique de la signature (HMAC SHA-1 ou SHA-256 selon fournisseur)
-        secret = str(os.getenv("PAYMENT_WEBHOOK_SECRET") or getattr(settings, "PAYMENT_WEBHOOK_SECRET", ""))
+        # 🚀 PROPRETÉ : Lecture sécurisée des settings sans os.getenv
+        secret = getattr(settings, 'PAYMENT_WEBHOOK_SECRET', '')
 
         signature_calculee = hmac.new(
             secret.encode('utf-8'),
             body_brut,
-            hashlib.sha1  # ⚠️ Assure-toi que ton fournisseur utilise bien SHA-1, sinon mets hashlib.sha256
+            hashlib.sha1
         ).hexdigest()
 
-        # hmac.compare_digest empêche les attaques temporelles (timing attacks)
         if not hmac.compare_digest(signature_recue, signature_calculee):
-            logger.warning("[Webhook] Requête rejetée : Signature invalide.")
             return Response({"error": "Invalid signature"}, status=403)
 
-        # 3. Extraction des données
         try:
             payload = json.loads(body_brut)
         except json.JSONDecodeError:
-            logger.warning("[Webhook] Requête rejetée : Format JSON invalide.")
             return Response({"error": "Invalid JSON"}, status=400)
 
         transaction_id = payload.get('transaction_id')
         external_reference = payload.get('external_reference')
         statut_gateway = payload.get('status')
 
-        # 4. Recherche de l'intention de paiement
         try:
-            paiement = Paiement.objects.get(reference=external_reference)
+            # 🚀 PERFORMANCE : select_related évite 2 requêtes SQL supplémentaires plus bas
+            paiement = Paiement.objects.select_related('contrat', 'lease').get(reference=external_reference)
         except Paiement.DoesNotExist:
-            logger.error(f"[Webhook] TX {transaction_id} : Référence inconnue ({external_reference}).")
             return Response({"error": "Payment not found"}, status=404)
 
-        # Idempotence : ignore le traitement si déjà effectué
         if paiement.statut in [Paiement.STATUT_VALIDE, Paiement.STATUT_ECHEC]:
-            logger.info(f"[Webhook] TX {transaction_id} ignorée : Déjà traitée ({paiement.statut}).")
             return Response({"status": "Already processed"}, status=200)
 
-        # 5. Traitement transactionnel atomique
         with transaction.atomic():
             paiement.webhook_payload = payload
 
             if statut_gateway == "SUCCESS":
-                # A. Validation du paiement
                 paiement.statut = Paiement.STATUT_VALIDE
                 paiement.date_paiement = timezone.now()
                 paiement.transaction_id = transaction_id
                 paiement.save()
 
-                # B. Mise à jour de l'échéance (Lease)
                 lease = paiement.lease
                 lease.montant_paye += paiement.montant
-
-                if lease.montant_paye >= lease.montant_attendu:
-                    lease.statut = Lease.STATUT_PAYE
-                else:
-                    lease.statut = Lease.STATUT_PARTIEL
+                lease.statut = Lease.STATUT_PAYE if lease.montant_paye >= lease.montant_attendu else Lease.STATUT_PARTIEL
                 lease.save()
 
-                # C. Mise à jour de la dette globale (Contrat)
                 contrat = paiement.contrat
-                contrat.montant_restant -= paiement.montant
+                # 🚀 INTÉGRITÉ FINANCIÈRE : Bloque à zéro et solde automatiquement
+                contrat.montant_restant = max(contrat.montant_restant - paiement.montant, Decimal('0.00'))
+
+                if contrat.montant_restant == 0:
+                    contrat.statut = Contrat.STATUT_SOLDE  # Adapte selon tes constantes
+
                 contrat.save()
 
-                # 🛑 AUCUNE MODIFICATION DE 'prochaine_echeance' ICI 🛑
-
-                logger.info(f"[Webhook] SUCCÈS - Paiement {external_reference} validé. Lease: {lease.statut}.")
-
             else:
-                # Gestion des échecs (FAILED, CANCELLED, etc.)
                 paiement.statut = Paiement.STATUT_ECHEC
                 paiement.save()
-                logger.warning(
-                    f"[Webhook] ÉCHEC - Paiement {external_reference} refusé (Code: {payload.get('errorCode')}).")
 
-        # 6. Acquittement (Code 200 pour stopper les retrys du fournisseur)
         return Response({"status": "Webhook acknowledged"}, status=200)
 
 
 class PaiementViewSet(TenantModelViewSet):
     """
-    API dédiée à l'enregistrement des paiements en ESPÈCES par les partenaires.
+    API unifiée de consultation et de caisse :
+    - GET : Liste TOUS les paiements (Espèces + Mobile Money)
+    - POST : Enregistre uniquement des paiements en ESPÈCES
+    - PUT/PATCH : Permet la correction comptable des paiements en ESPÈCES
     """
     serializer_class = PaiementSerializer
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        """
-        On ne liste que les paiements en espèces de l'entreprise de l'utilisateur.
-        """
         user = self.request.user
-        # On filtre par compte_id (Multi-tenant) et par méthode ESPECES
+
+        # On récupère tous les paiements (plus de filtre sur la méthode)
         queryset = Paiement.objects.filter(
             compte_id=user.compte_id,
         ).select_related('utilisateur', 'contrat', 'lease')
 
-        # Si ce n'est pas un admin ou un partenaire avec vue globale,
-        # (sécurité supplémentaire au cas où un chauffeur accède à cette route)
+        # Isolation de sécurité pour les chauffeurs
         if not (user.is_staff or user.has_perm('recouvrement.view_all_paiements')):
             queryset = queryset.filter(contrat__chauffeur=user)
 
-        return queryset
+        # On trie du plus récent au plus ancien (très important pour un journal de caisse)
+        # Utilise 'date_paiement' ou 'created_at' selon les champs de ton BaseModel
+        return queryset.order_by('-created_at')
 
     def create(self, request, *args, **kwargs):
-        """
-        Création simplifiée : le Serializer s'occupe de tout le travail lourd.
-        """
+        """Création d'un paiement en espèces."""
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        # Le .save() déclenche le create() du serializer qui :
-        # 1. Force la méthode ESPECES
-        # 2. Valide immédiatement le paiement
-        # 3. Met à jour le montant restant du contrat et du lease
+        # Le serializer injecte METHODE_ESPECES et s'occupe des transactions
         serializer.save()
 
-        # Réponse de succès standardisée pour les espèces
         headers = self.get_success_headers(serializer.data)
         return Response({
             "success": True,
@@ -302,9 +330,30 @@ class PaiementViewSet(TenantModelViewSet):
             "data": serializer.data
         }, status=status.HTTP_201_CREATED, headers=headers)
 
+    def update(self, request, *args, **kwargs):
+        """
+        Surcharge de la mise à jour pour garantir que la réponse JSON
+        a exactement la même structure que la création.
+        """
+        partial = kwargs.pop('partial', False)
+        instance = self.get_object()
+
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+
+        # Le serializer s'occupe du blocage si c'est du Mobile Money
+        # et du recalcul des dettes.
+        self.perform_update(serializer)
+
+        return Response({
+            "success": True,
+            "message": "Le paiement a été corrigé avec succès.",
+            "data": serializer.data
+        }, status=status.HTTP_200_OK)
+
     def perform_destroy(self, instance):
-        """
-        Optionnel : Si tu veux interdire la suppression pure et simple.
-        """
-        # On peut imaginer une règle métier qui interdit de supprimer un paiement validé
-        raise PermissionDenied("Un paiement validé ne peut pas être supprimé. Utilisez une annulation.")
+        """Protection absolue contre la suppression des traces financières."""
+        raise PermissionDenied(
+            "Un paiement ne peut pas être supprimé de la base de données. "
+            "En cas d'erreur grave, veuillez utiliser la procédure d'annulation."
+        )

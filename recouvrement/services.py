@@ -68,6 +68,9 @@ class MobilePaymentService:
             return response.json()
 
         except requests.exceptions.RequestException as e:
+            if e.response is not None:
+                print("🚨 DÉTAILS DU REFUS PAYGATE :", e.response.text)
+                logger.error(f"Détails PayGate : {e.response.text}")
             # On loggue l'erreur technique complète pour les développeurs
             logger.error(f"Erreur API Paiement [{url}] pour la ref {external_reference}: {str(e)}")
 

@@ -84,17 +84,16 @@ class CustomUser(AbstractBaseUser, BaseModel):
     # SURCHARGE DES PERMISSIONS DJANGO
     # ==========================================
     def has_perm(self, perm, obj=None):
-        """Vérifie si l'utilisateur possède une permission spécifique."""
         if not self.is_active:
             return False
-        if self.is_superuser:  # Sécurité : is_staff ne donne plus tous les droits
+        if self.is_superuser:
             return True
-
-        codename = perm.split('.')[-1]
-        return self.assignations_roles.filter(
-            actif=True,
-            role__permissions__codename=codename
-        ).exists()
+        if not hasattr(self, '_perm_cache'):
+            self._perm_cache = set(
+                self.assignations_roles.filter(actif=True)
+                .values_list('role__permissions__codename', flat=True)
+            )
+        return perm.split('.')[-1] in self._perm_cache
 
     def has_perms(self, perm_list, obj=None):
         """Vérifie si l'utilisateur possède TOUTES les permissions de la liste (Requis par DRF)."""
@@ -102,20 +101,19 @@ class CustomUser(AbstractBaseUser, BaseModel):
             return False
         if self.is_superuser:
             return True
-
         return all(self.has_perm(perm, obj) for perm in perm_list)
 
     def has_module_perms(self, app_label):
-        """Vérifie si l'utilisateur a accès à une application entière."""
         if not self.is_active:
             return False
         if self.is_superuser:
             return True
-
-        return self.assignations_roles.filter(
-            actif=True,
-            role__permissions__content_type__app_label=app_label
-        ).exists()
+        if not hasattr(self, '_module_perm_cache'):
+            self._module_perm_cache = set(
+                self.assignations_roles.filter(actif=True)
+                .values_list('role__permissions__content_type__app_label', flat=True)
+            )
+        return app_label in self._module_perm_cache
 
 
 # ==========================================

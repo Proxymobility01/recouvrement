@@ -1,4 +1,5 @@
 import random
+import secrets
 import string
 from decimal import Decimal
 from django.core.validators import MinValueValidator
@@ -121,21 +122,14 @@ class Paiement(BaseModel):
 
     @classmethod
     def generer_reference_paiement(cls, methode):
-        """
-        Génère une référence unique d'audit au format: PREFIX.YYYYMMDD.HHMM.RANDOM
-        Exemple Mobile : MOB.20260420.1107.A1B2C3
-        Exemple Espèces : ESP.20260420.1107.X9Y8Z7
-        """
-        # Choix dynamique du préfixe
+        """Génère une référence unique d'audit cryptographiquement sûre."""
         prefix = "ESP" if methode == cls.METHODE_ESPECES else "MOB"
-
         now = timezone.now()
         date_str = now.strftime("%Y%m%d")
-        heure_str = now.strftime("%H%M")
+        heure_str = now.strftime("%H%M%S")  # Ajout des secondes pour plus de précision
 
-        # Génère 6 caractères alphanumériques aléatoires (majuscules + chiffres)
-        chars = string.ascii_uppercase + string.digits
-        random_suffix = ''.join(random.choice(chars) for _ in range(6))
+        # 🚀 SÉCURITÉ CRYPTOGRAPHIQUE : Remplace random.choice
+        random_suffix = secrets.token_hex(3).upper()  # Ex: A1B2C3
 
         return f"{prefix}.{date_str}.{heure_str}.{random_suffix}"
 

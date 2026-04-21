@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from django.db import transaction
 from django.utils import timezone
 from rest_framework import serializers
@@ -105,6 +107,17 @@ class LeaseSerializer(serializers.ModelSerializer):
     def get_reste_a_payer(self, obj):
         return obj.montant_attendu - obj.montant_paye
 
+class CalendrierSerializer(serializers.ModelSerializer):
+    chauffeur_nom = serializers.CharField(source='contrat.chauffeur.nom_complet', read_only=True, default="Inconnu")
+
+
+    class Meta:
+        model = Lease
+        fields = [
+            'id', 'date_echeance',
+            'chauffeur_nom','statut',
+        ]
+
 
 class InitiationPaiementSerializer(serializers.Serializer):
     lease_id = serializers.IntegerField()
@@ -140,48 +153,59 @@ class InitiationPaiementSerializer(serializers.Serializer):
 
 class PaiementSerializer(serializers.ModelSerializer):
     # Affichage des noms pour le Front-End
-    chauffeur_nom = serializers.CharField(source='contrat.nom_complet', read_only=True)
-    encaisseur_nom = serializers.CharField(source='utilisateur.nom_complet', read_only=True)
+    chauffeur_nom_complet = serializers.CharField(source='contrat.nom_complet', read_only=True)
+    enregistre_par = serializers.CharField(source='utilisateur.nom_complet', read_only=True)
 
     class Meta:
         model = Paiement
         fields = [
             'id', 'lease', 'montant', 'methode', 'reference',
             'transaction_id', 'statut', 'date_paiement',
-            'chauffeur_nom', 'encaisseur_nom'
+            'chauffeur_nom_complet', 'enregistre_par'
         ]
-        # On ajoute 'methode' en read_only car elle est gérée par le serveur, pas par le body
+        # 'methode' est read_only car elle est gérée par le serveur
         read_only_fields = [
             'methode', 'reference', 'transaction_id', 'statut',
-            'date_paiement', 'chauffeur_nom', 'encaisseur_nom'
+            'date_paiement', 'chauffeur_nom_complet', 'enregistre_par'
         ]
 
     def validate(self, attrs):
         user = self.context['request'].user
-        lease = attrs.get('lease')
-        montant = attrs.get('montant')
+
+        # On utilise get avec getattr pour supporter les requêtes PATCH (où tous les champs ne sont pas envoyés)
+        lease = attrs.get('lease', getattr(self.instance, 'lease', None))
+        montant = attrs.get('montant', getattr(self.instance, 'montant', None))
 
         # 1. 🛡️ SÉCURITÉ : Multi-Tenant & Droits
-        if lease.contrat.compte_id != user.compte_id:
+        if lease and lease.contrat.compte_id != user.compte_id:
             raise serializers.ValidationError({"lease": "Cette échéance est introuvable."})
 
-        # On vérifie que c'est un partenaire ou admin car c'est une route "Espèces"
+        # Vérification du droit d'encaissement d'espèces
         if not (user.is_staff or user.has_perm('recouvrement.can_validate_payment')):
             raise serializers.ValidationError(
-                {"erreur": "Vous n'avez pas l'autorisation d'enregistrer un paiement en espèces."})
+                {"erreur": "Vous n'avez pas l'autorisation de gérer des paiements en espèces."})
 
-        # 2. 💰 VÉRIFICATIONS FINANCIÈRES
-        if lease.statut == Lease.STATUT_PAYE:
-            raise serializers.ValidationError({"lease": "Cette échéance est déjà totalement soldée."})
+        if montant is not None and montant <= 0:
+            raise serializers.ValidationError({"montant": "Le montant doit être strictement positif."})
 
-        if montant <= 0:
-            raise serializers.ValidationError({"montant": "Le montant doit être positif."})
+        # 2. 💰 VÉRIFICATIONS FINANCIÈRES INTELLIGENTES (Création vs Mise à jour)
+        if lease and montant is not None:
+            if self.instance:
+                # --- MODE MISE À JOUR (UPDATE) ---
+                # On calcule le reste à payer en ignorant le montant de CE paiement actuel
+                deja_paye_autres = lease.montant_paye - self.instance.montant
+                reste_a_payer = lease.montant_attendu - deja_paye_autres
+            else:
+                # --- MODE CRÉATION (CREATE) ---
+                if lease.statut == Lease.STATUT_PAYE:
+                    raise serializers.ValidationError({"lease": "Cette échéance est déjà totalement soldée."})
+                reste_a_payer = lease.montant_attendu - lease.montant_paye
 
-        reste_a_payer = lease.montant_attendu - lease.montant_paye
-        if montant > reste_a_payer:
-            raise serializers.ValidationError({
-                "montant": f"Le montant dépasse le reste à payer ({reste_a_payer})."
-            })
+            # Vérification finale commune
+            if montant > reste_a_payer:
+                raise serializers.ValidationError({
+                    "montant": f"Le montant ({montant}) dépasse le reste à payer autorisé ({reste_a_payer})."
+                })
 
         return attrs
 
@@ -190,7 +214,7 @@ class PaiementSerializer(serializers.ModelSerializer):
         lease = validated_data['lease']
         montant = validated_data['montant']
 
-        # 🚀 INJECTION AUTOMATIQUE : On force les valeurs pour les Espèces
+        # 🚀 INJECTION AUTOMATIQUE : Valeurs pour Espèces
         validated_data['methode'] = Paiement.METHODE_ESPECES
         validated_data['contrat'] = lease.contrat
         validated_data['utilisateur'] = user
@@ -198,55 +222,56 @@ class PaiementSerializer(serializers.ModelSerializer):
         validated_data['statut'] = Paiement.STATUT_VALIDE
         validated_data['date_paiement'] = timezone.now()
 
-        # Génération de la référence avec ton format spécifique ESP.YYYYMMDD...
+        # Génération de la référence (ESP.YYYYMMDD...)
         validated_data['reference'] = Paiement.generer_reference_paiement(Paiement.METHODE_ESPECES)
 
         with transaction.atomic():
-            # Création du paiement
             paiement = super().create(validated_data)
 
-            # Mise à jour de l'échéance (Lease)
+            # Ajustement Lease
             lease.montant_paye += montant
-            if lease.montant_paye >= lease.montant_attendu:
-                lease.statut = Lease.STATUT_PAYE
-            else:
-                lease.statut = Lease.STATUT_PARTIEL
+            lease.statut = Lease.STATUT_PAYE if lease.montant_paye >= lease.montant_attendu else Lease.STATUT_PARTIEL
             lease.save()
 
-            # Mise à jour de la dette globale (Contrat)
+            # Ajustement Contrat
             contrat = lease.contrat
-            contrat.montant_restant -= montant
+            contrat.montant_restant = max(contrat.montant_restant - montant, Decimal('0.00'))
+            if contrat.montant_restant == 0:
+                contrat.statut = Contrat.STATUT_SOLDE
             contrat.save()
 
             return paiement
 
     def update(self, instance, validated_data):
-        # Sécurité : On ne modifie jamais un paiement Mobile Money ici
+        # Sécurité : Un paiement Mobile Money est intouchable depuis cette route
         if instance.methode == Paiement.METHODE_MOBILE_MONEY:
-            raise serializers.ValidationError({"erreur": "Impossible de modifier un paiement Mobile Money."})
+            raise serializers.ValidationError(
+                {"erreur": "Impossible de modifier un paiement Mobile Money manuellement."})
 
-        # Protection des champs pivots
+        # Protection : On ne peut pas déplacer le paiement sur une autre échéance ni changer sa nature
         validated_data.pop('methode', None)
         validated_data.pop('lease', None)
 
         nouveau_montant = validated_data.get('montant')
 
+        # ⚖️ RECALCUL COMPTABLE (Correction)
         if nouveau_montant is not None and nouveau_montant != instance.montant:
             difference = nouveau_montant - instance.montant
             lease = instance.lease
             contrat = lease.contrat
 
-            if lease.montant_paye + difference > lease.montant_attendu:
-                raise serializers.ValidationError({"montant": "Correction impossible : dépasse le montant attendu."})
-
             with transaction.atomic():
-                # Ajustement Lease
+                # On ajuste le Lease avec la différence mathématique (+ ou -)
                 lease.montant_paye += difference
                 lease.statut = Lease.STATUT_PAYE if lease.montant_paye >= lease.montant_attendu else Lease.STATUT_PARTIEL
                 lease.save()
+                contrat.montant_restant = max(contrat.montant_restant - difference, 0)
 
-                # Ajustement Contrat
-                contrat.montant_restant -= difference
+                # Gestion dynamique du statut en cas de correction
+                if contrat.montant_restant == 0:
+                    contrat.statut = Contrat.STATUT_SOLDE
+                elif contrat.statut == Contrat.STATUT_SOLDE and contrat.montant_restant > 0:
+                    contrat.statut = Contrat.STATUT_ACTIF
                 contrat.save()
 
         return super().update(instance, validated_data)
