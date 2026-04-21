@@ -109,22 +109,14 @@ class InitiationPaiementView(APIView):
         serializer = InitiationPaiementSerializer(data=request.data, context={'request': request})
         serializer.is_valid(raise_exception=True)
 
-        # On récupère les données nettoyées
         lease = serializer.validated_data['lease_id']
         montant = serializer.validated_data['montant']
         phone_number = serializer.validated_data.get('phone_number')
 
         # 2. Génération de la référence d'audit interne
-        reference_interne = MobilePaymentService.generer_reference_paiement()
+        reference_interne = Paiement.generer_reference_paiement(Paiement.METHODE_MOBILE_MONEY)
 
-        # 3. Appel au fournisseur Mobile Money
-        pay_response = MobilePaymentService.initier_checkout(
-            montant=montant,
-            external_reference=reference_interne,
-            phone_number=phone_number
-        )
-
-        # 4. Enregistrement de l'intention (Statut: EN ATTENTE)
+        # 3. 🛡️ SAUVEGARDE LOCALE D'ABORD (Garantit qu'on garde une trace quoi qu'il arrive)
         paiement = Paiement.objects.create(
             contrat=lease.contrat,
             lease=lease,
@@ -133,19 +125,41 @@ class InitiationPaiementView(APIView):
             montant=montant,
             methode=Paiement.METHODE_MOBILE_MONEY,
             reference=reference_interne,
-            transaction_id=pay_response.get('transaction_id'),
-            statut=Paiement.STATUT_EN_ATTENTE
+            statut=Paiement.STATUT_EN_ATTENTE  # Reste en attente
         )
 
-        # 5. Réponse au Front-End
-        return Response({
-            "success": True,
-            "message": "Session de paiement créée avec succès.",
-            "paiement_id": paiement.id,
-            "reference": paiement.reference,
-            "redirect_url": pay_response.get('redirect_url'),
-            "session_token": pay_response.get('session_token')
-        }, status=status.HTTP_201_CREATED)
+        # 4. APPEL AU FOURNISSEUR MOBILE MONEY
+        try:
+            pay_response = MobilePaymentService.initier_checkout(
+                montant=montant,
+                external_reference=reference_interne,
+                phone_number=phone_number
+            )
+
+            # Mise à jour avec les infos de l'opérateur
+            paiement.transaction_id = pay_response.get('transaction_id')
+            paiement.save(update_fields=['transaction_id'])
+
+            # 5. Réponse de succès au Front-End
+            return Response({
+                "success": True,
+                "message": "Session de paiement créée avec succès.",
+                "paiement_id": paiement.id,
+                "reference": paiement.reference,
+                "redirect_url": pay_response.get('redirect_url'),
+                "session_token": pay_response.get('session_token')
+            }, status=status.HTTP_201_CREATED)
+
+        except Exception as e:
+            # 🚨 SI L'API MOBILE MONEY PLANTE (ex: Orange/MTN est hors ligne)
+            # On passe notre trace locale en ECHEC pour que la compta soit propre
+            paiement.statut = Paiement.STATUT_ECHEC
+            paiement.save(update_fields=['statut'])
+
+            return Response(
+                {"error": "Le service de paiement mobile est temporairement indisponible.", "details": str(e)},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE
+            )
 
 
 class MobilePaymentWebhookView(APIView):
@@ -165,15 +179,16 @@ class MobilePaymentWebhookView(APIView):
             logger.warning("[Webhook] Requête rejetée : Signature manquante.")
             return Response({"error": "Missing signature"}, status=400)
 
-        # 2. Vérification cryptographique de la signature (HMAC SHA-1)
+        # 2. Vérification cryptographique de la signature (HMAC SHA-1 ou SHA-256 selon fournisseur)
         secret = str(os.getenv("PAYMENT_WEBHOOK_SECRET") or getattr(settings, "PAYMENT_WEBHOOK_SECRET", ""))
 
         signature_calculee = hmac.new(
             secret.encode('utf-8'),
             body_brut,
-            hashlib.sha1
+            hashlib.sha1  # ⚠️ Assure-toi que ton fournisseur utilise bien SHA-1, sinon mets hashlib.sha256
         ).hexdigest()
 
+        # hmac.compare_digest empêche les attaques temporelles (timing attacks)
         if not hmac.compare_digest(signature_recue, signature_calculee):
             logger.warning("[Webhook] Requête rejetée : Signature invalide.")
             return Response({"error": "Invalid signature"}, status=403)
@@ -203,7 +218,6 @@ class MobilePaymentWebhookView(APIView):
 
         # 5. Traitement transactionnel atomique
         with transaction.atomic():
-            # Sauvegarde de la trace d'audit
             paiement.webhook_payload = payload
 
             if statut_gateway == "SUCCESS":
@@ -223,22 +237,21 @@ class MobilePaymentWebhookView(APIView):
                     lease.statut = Lease.STATUT_PARTIEL
                 lease.save()
 
-                # C. Mise à jour du Contrat
+                # C. Mise à jour de la dette globale (Contrat)
                 contrat = paiement.contrat
                 contrat.montant_restant -= paiement.montant
-
-                # Décalage de l'échéance uniquement si la journée est soldée
-                if lease.statut == Lease.STATUT_PAYE:
-                    contrat.prochaine_echeance = lease.date_echeance + timedelta(days=1)
-
                 contrat.save()
+
+                # 🛑 AUCUNE MODIFICATION DE 'prochaine_echeance' ICI 🛑
+
                 logger.info(f"[Webhook] SUCCÈS - Paiement {external_reference} validé. Lease: {lease.statut}.")
 
             else:
                 # Gestion des échecs (FAILED, CANCELLED, etc.)
                 paiement.statut = Paiement.STATUT_ECHEC
                 paiement.save()
-                logger.warning(f"[Webhook] ÉCHEC - Paiement {external_reference} refusé (Code: {payload.get('errorCode')}).")
+                logger.warning(
+                    f"[Webhook] ÉCHEC - Paiement {external_reference} refusé (Code: {payload.get('errorCode')}).")
 
         # 6. Acquittement (Code 200 pour stopper les retrys du fournisseur)
         return Response({"status": "Webhook acknowledged"}, status=200)

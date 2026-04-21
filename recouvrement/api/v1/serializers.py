@@ -112,47 +112,29 @@ class InitiationPaiementSerializer(serializers.Serializer):
     phone_number = serializers.CharField(max_length=20, required=False, allow_blank=True)
 
     def validate_lease_id(self, value):
-        # 1. On récupère l'utilisateur connecté via le contexte du serializer
         user = self.context['request'].user
-
         try:
-            # On commence par construire la requête avec la sécurité Multi-Tenant
             lease_query = Lease.objects.filter(id=value, contrat__compte_id=user.compte_id)
-
-            # 🛡️ LE CORRECTIF DE SÉCURITÉ EST ICI :
-            # Si l'utilisateur n'est pas un administrateur du système,
-            # on exige formellement qu'il soit le chauffeur titulaire du contrat.
             if not user.is_staff and not user.is_superuser:
                 lease_query = lease_query.filter(contrat__chauffeur=user)
-
-            # On exécute la requête finale
             lease = lease_query.get()
 
         except Lease.DoesNotExist:
-            # Message générique pour ne pas donner d'indices à un attaquant
             raise serializers.ValidationError("Cette échéance est introuvable ou vous n'avez pas l'autorisation de la payer.")
-
-        # 2. On vérifie que l'échéance n'est pas déjà soldée
         if lease.statut == Lease.STATUT_PAYE:
             raise serializers.ValidationError("Cette échéance a déjà été totalement payée.")
-
         return lease
 
     def validate(self, attrs):
-        # 'lease_id' contient maintenant l'objet Lease grâce à validate_lease_id
         lease = attrs.get('lease_id')
         montant = attrs.get('montant')
-
         if montant <= 0:
             raise serializers.ValidationError({"montant": "Le montant doit être strictement positif."})
-
-        # 3. Vérification financière stricte
         reste_a_payer = lease.montant_attendu - lease.montant_paye
         if montant > reste_a_payer:
             raise serializers.ValidationError({
                 "montant": f"Le montant ({montant}) dépasse le reste à payer pour cette échéance ({reste_a_payer})."
             })
-
         return attrs
 
 
