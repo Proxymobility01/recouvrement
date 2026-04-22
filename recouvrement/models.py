@@ -118,7 +118,89 @@ class Lease(BaseModel):
 
 
 
+class SessionPaiement(BaseModel):
+    """
+    Représente un panier de paiement global regroupant plusieurs échéances.
+    C'est cette référence qui est envoyée au fournisseur Mobile Money.
+    """
+    STATUT_EN_ATTENTE = 'EN_ATTENTE'
+    STATUT_VALIDE = 'VALIDE'
+    STATUT_ECHEC = 'ECHEC'
+    STATUT_ANNULE = 'ANNULE'
+
+    STATUT_CHOICES = [
+        (STATUT_EN_ATTENTE, 'En attente'),
+        (STATUT_VALIDE, 'Validé'),
+        (STATUT_ECHEC, 'Échec'),
+        (STATUT_ANNULE, 'Annulé'),
+    ]
+
+    reference = models.CharField(max_length=100, unique=True,)
+    transaction_id = models.CharField(max_length=255, null=True, blank=True, help_text="ID transaction fournisseur")
+    date_validation = models.DateTimeField(null=True, blank=True)
+    montant_total = models.DecimalField(max_digits=12, decimal_places=2)
+    telephone = models.CharField(max_length=20, null=True, blank=True)
+    webhook_payload = models.JSONField(null=True, blank=True)
+    statut = models.CharField(max_length=20, choices=STATUT_CHOICES, default=STATUT_EN_ATTENTE)
+
+    utilisateur = models.ForeignKey(
+        CustomUser,
+        on_delete=models.PROTECT,
+        related_name="sessions_initiees"
+    )
+
+
+    class Meta:
+        db_table = "recouvrement_session_paiement"
+
+
+
+    def __str__(self):
+        return f"Session {self.reference} - {self.montant_total} XAF"
+
+
 class Paiement(BaseModel):
+    # --- Constantes de Méthode ---
+    METHODE_MOBILE_MONEY = 'MOBILE_MONEY'
+    METHODE_ESPECES = 'ESPECES'
+
+    METHODE_CHOICES = [
+        (METHODE_MOBILE_MONEY, 'Mobile Money'),
+        (METHODE_ESPECES, 'Espèces'),
+    ]
+
+
+    STATUT_EN_ATTENTE = 'EN_ATTENTE'
+    STATUT_VALIDE = 'VALIDE'
+    STATUT_ECHEC = 'ECHEC'
+    STATUT_ANNULE = 'ANNULE'
+
+    STATUT_CHOICES = [
+        (STATUT_EN_ATTENTE, 'En attente'),
+        (STATUT_VALIDE, 'Validé'),
+        (STATUT_ECHEC, 'Échec'),
+        (STATUT_ANNULE, 'Annulé'),
+    ]
+
+    contrat = models.ForeignKey(Contrat, on_delete=models.PROTECT, related_name="paiements")
+    lease = models.ForeignKey(Lease, on_delete=models.PROTECT, related_name="paiements", null=True, blank=True)
+    utilisateur = models.ForeignKey(CustomUser, on_delete=models.PROTECT, related_name="paiements_effectues")
+
+    # 🚀 CORRECTION 1 : null=True est INDISPENSABLE pour que les espèces fonctionnent
+    session = models.ForeignKey(
+        SessionPaiement,
+        on_delete=models.CASCADE,
+        related_name="lignes_paiement",
+        null=True,
+        blank=True
+    )
+
+    montant = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(Decimal('0.01'))])
+    methode = models.CharField(max_length=20, choices=METHODE_CHOICES)
+    reference = models.CharField(max_length=255, unique=True)
+    est_annule = models.BooleanField(default=False)
+    statut = models.CharField(max_length=20, choices=STATUT_CHOICES, default=STATUT_EN_ATTENTE)
+    date_paiement = models.DateTimeField(null=True, blank=True)
 
     @classmethod
     def generer_reference_paiement(cls, methode):
@@ -133,61 +215,6 @@ class Paiement(BaseModel):
 
         return f"{prefix}.{date_str}.{heure_str}.{random_suffix}"
 
-
-    # --- Constantes de Méthode ---
-    METHODE_MOBILE_MONEY = 'MOBILE_MONEY'
-    METHODE_ESPECES = 'ESPECES'
-
-    METHODE_CHOICES = [
-        (METHODE_MOBILE_MONEY, 'Mobile Money'),
-        (METHODE_ESPECES, 'Espèces'),
-    ]
-
-    # --- Constantes de Statut ---
-    STATUT_EN_ATTENTE = 'EN_ATTENTE'
-    STATUT_VALIDE = 'VALIDE'
-    STATUT_ECHEC = 'ECHEC'
-    STATUT_ANNULE = 'ANNULE'
-
-    STATUT_CHOICES = [
-        (STATUT_EN_ATTENTE, 'En attente'),
-        (STATUT_VALIDE, 'Validé'),
-        (STATUT_ECHEC, 'Échec'),
-        (STATUT_ANNULE, 'Annulé'),
-    ]
-
-    contrat = models.ForeignKey(
-        Contrat,
-        on_delete=models.PROTECT,
-        related_name="paiements"
-    )
-    lease = models.ForeignKey(
-        Lease,
-        on_delete=models.PROTECT,
-        related_name="paiements",
-        null=True,
-        blank=True
-    )
-    utilisateur = models.ForeignKey(
-        CustomUser,
-        on_delete=models.PROTECT,
-        related_name="paiements_effectues"
-    )
-    webhook_payload = models.JSONField(
-        null=True,
-        blank=True,
-        help_text="Stocke la copie exacte du dernier webhook reçu du fournisseur."
-    )
-
-    montant = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(Decimal('0.01'))])
-    methode = models.CharField(max_length=20, choices=METHODE_CHOICES)
-    date_paiement = models.DateTimeField(null=True, blank=True)
-
-    reference = models.CharField(max_length=255, unique=True)
-    transaction_id = models.CharField(max_length=255, null=True, blank=True)
-
-    statut = models.CharField(max_length=20, choices=STATUT_CHOICES, default=STATUT_EN_ATTENTE)
-
     class Meta:
         db_table = "recouvrement_paiement"
         permissions = [
@@ -195,6 +222,15 @@ class Paiement(BaseModel):
             ("can_cancel_payment", "Peut annuler une transaction erronée"),
             ("view_all_paiements", "Peut voir tous les paiements de son entreprise"),
         ]
+
+
+    @property
+    def transaction_id(self):
+        """Les espèces n'ont pas d'ID de transaction MTN/Orange."""
+        if self.session:
+            return self.session.transaction_id
+        return None
+
 
     def __str__(self):
         return f"Paiement {self.reference} - {self.montant}"

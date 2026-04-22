@@ -119,40 +119,108 @@ class CalendrierSerializer(serializers.ModelSerializer):
         ]
 
 
-class InitiationPaiementSerializer(serializers.Serializer):
+# class InitiationPaiementSerializer(serializers.Serializer):
+#     lease_id = serializers.IntegerField()
+#     montant = serializers.DecimalField(max_digits=12, decimal_places=2)
+#     phone_number = serializers.CharField(max_length=20, required=False, allow_blank=True)
+#
+#     def validate_lease_id(self, value):
+#         user = self.context['request'].user
+#         try:
+#             lease_query = Lease.objects.filter(id=value, contrat__compte_id=user.compte_id)
+#             if not user.is_staff and not user.is_superuser:
+#                 lease_query = lease_query.filter(contrat__chauffeur=user)
+#             lease = lease_query.get()
+#
+#         except Lease.DoesNotExist:
+#             raise serializers.ValidationError("Cette échéance est introuvable ou vous n'avez pas l'autorisation de la payer.")
+#         if lease.statut == Lease.STATUT_PAYE:
+#             raise serializers.ValidationError("Cette échéance a déjà été totalement payée.")
+#         return lease
+#
+#     def validate(self, attrs):
+#         lease = attrs.get('lease_id')
+#         montant = attrs.get('montant')
+#         if montant <= 0:
+#             raise serializers.ValidationError({"montant": "Le montant doit être strictement positif."})
+#         reste_a_payer = lease.montant_attendu - lease.montant_paye
+#         if montant > reste_a_payer:
+#             raise serializers.ValidationError({
+#                 "montant": f"Le montant ({montant}) dépasse le reste à payer pour cette échéance ({reste_a_payer})."
+#             })
+#         return attrs
+
+class LignePaiementSerializer(serializers.Serializer):
+    """
+    Ce sous-serializer s'occupe de valider UNE SEULE ligne de paiement.
+    """
     lease_id = serializers.IntegerField()
     montant = serializers.DecimalField(max_digits=12, decimal_places=2)
-    phone_number = serializers.CharField(max_length=20, required=False, allow_blank=True)
 
     def validate_lease_id(self, value):
         user = self.context['request'].user
         try:
-            lease_query = Lease.objects.filter(id=value, contrat__compte_id=user.compte_id)
+            # Sécurité Multi-Tenant et Rôle
+            lease_query = Lease.objects.select_related('contrat').filter(id=value, contrat__compte_id=user.compte_id)
             if not user.is_staff and not user.is_superuser:
                 lease_query = lease_query.filter(contrat__chauffeur=user)
+
             lease = lease_query.get()
 
         except Lease.DoesNotExist:
-            raise serializers.ValidationError("Cette échéance est introuvable ou vous n'avez pas l'autorisation de la payer.")
+            raise serializers.ValidationError(f"L'échéance #{value} est introuvable ou vous n'avez pas l'autorisation.")
+
         if lease.statut == Lease.STATUT_PAYE:
-            raise serializers.ValidationError("Cette échéance a déjà été totalement payée.")
+            raise serializers.ValidationError(f"L'échéance #{value} a déjà été totalement payée.")
+
         return lease
 
     def validate(self, attrs):
+        # 'lease_id' contient maintenant l'objet Lease lui-même grâce au validate_lease_id
         lease = attrs.get('lease_id')
         montant = attrs.get('montant')
+
         if montant <= 0:
-            raise serializers.ValidationError({"montant": "Le montant doit être strictement positif."})
+            raise serializers.ValidationError({"montant": f"Le montant pour l'échéance #{lease.id} doit être positif."})
+
         reste_a_payer = lease.montant_attendu - lease.montant_paye
         if montant > reste_a_payer:
             raise serializers.ValidationError({
-                "montant": f"Le montant ({montant}) dépasse le reste à payer pour cette échéance ({reste_a_payer})."
+                "montant": f"Le montant ({montant}) dépasse le reste à payer ({reste_a_payer}) pour l'échéance #{lease.id}."
             })
+
+        return attrs
+
+
+class InitiationPaiementSerializer(serializers.Serializer):
+    """
+    Le serializer principal qui reçoit la requête globale.
+    """
+    # On accepte une liste de lignes, et on interdit qu'elle soit vide
+    lignes = LignePaiementSerializer(many=True, allow_empty=False)
+    phone_number = serializers.CharField(max_length=20, required=False, allow_blank=True)
+
+    def validate(self, attrs):
+        lignes = attrs.get('lignes', [])
+
+        # 1. Protection contre les doublons
+        # On vérifie que le Front-End n'a pas envoyé deux fois le même lease_id dans le même panier
+        lease_ids = [ligne['lease_id'].id for ligne in lignes]
+        if len(lease_ids) != len(set(lease_ids)):
+            raise serializers.ValidationError(
+                {"lignes": "Vous avez sélectionné plusieurs fois la même échéance dans votre panier."})
+
+        # 2. Règle métier (Optionnelle mais recommandée)
+        # On s'assure que toutes les échéances qu'il essaie de payer appartiennent bien au MÊME contrat.
+        contrat_ids = set([ligne['lease_id'].contrat_id for ligne in lignes])
+        if len(contrat_ids) > 1:
+            raise serializers.ValidationError(
+                {"lignes": "Toutes les échéances payées en une fois doivent appartenir au même contrat."})
+
         return attrs
 
 
 class PaiementSerializer(serializers.ModelSerializer):
-    # Affichage des noms pour le Front-End
     chauffeur_nom_complet = serializers.CharField(source='contrat.nom_complet', read_only=True)
     enregistre_par = serializers.CharField(source='utilisateur.nom_complet', read_only=True)
 

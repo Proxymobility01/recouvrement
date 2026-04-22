@@ -24,7 +24,7 @@ from core.exceptions import CustomAPIException
 from core.errors import ErrorCodes
 from .serializers import ContratSerializer, LeaseSerializer, InitiationPaiementSerializer, PaiementSerializer, \
     CalendrierSerializer
-from ...models import Contrat, Paiement, Lease
+from ...models import Contrat, Paiement, Lease, SessionPaiement
 from ...services import MobilePaymentService
 
 logger = logging.getLogger(__name__)
@@ -154,64 +154,154 @@ class LeaseViewSet(TenantModelViewSet):
         return Response(resultat_final)
 
 
+# class InitiationPaiementView(APIView):
+#     """
+#     Vue dédiée EXCLUSIVEMENT à l'initiation d'un paiement Mobile Money.
+#     Endpoint: POST /api/v1/initier-paiement/
+#     """
+#     permission_classes = [IsAuthenticated]
+#
+#     def post(self, request, *args, **kwargs):
+#         # 1. Validation des données d'entrée
+#         serializer = InitiationPaiementSerializer(data=request.data, context={'request': request})
+#         serializer.is_valid(raise_exception=True)
+#
+#         lease = serializer.validated_data['lease_id']
+#         montant = serializer.validated_data['montant']
+#         phone_number = serializer.validated_data.get('phone_number')
+#
+#         # 2. Génération de la référence d'audit interne
+#         reference_interne = Paiement.generer_reference_paiement(Paiement.METHODE_MOBILE_MONEY)
+#
+#         # 3. 🛡️ SAUVEGARDE LOCALE D'ABORD (Garantit qu'on garde une trace quoi qu'il arrive)
+#         paiement = Paiement.objects.create(
+#             contrat=lease.contrat,
+#             lease=lease,
+#             utilisateur=request.user,
+#             compte_id=request.user.compte_id,
+#             montant=montant,
+#             methode=Paiement.METHODE_MOBILE_MONEY,
+#             reference=reference_interne,
+#             statut=Paiement.STATUT_EN_ATTENTE  # Reste en attente
+#         )
+#
+#         # 4. APPEL AU FOURNISSEUR MOBILE MONEY
+#         try:
+#             pay_response = MobilePaymentService.initier_checkout(
+#                 montant=montant,
+#                 external_reference=reference_interne,
+#                 phone_number=phone_number
+#             )
+#
+#             # Mise à jour avec les infos de l'opérateur
+#             paiement.transaction_id = pay_response.get('transaction_id')
+#             paiement.save(update_fields=['transaction_id'])
+#
+#             # 5. Réponse de succès au Front-End
+#             return Response({
+#                 "success": True,
+#                 "message": "Session de paiement créée avec succès.",
+#                 "paiement_id": paiement.id,
+#                 "reference": paiement.reference,
+#                 "redirect_url": pay_response.get('redirect_url'),
+#                 "session_token": pay_response.get('session_token')
+#             }, status=status.HTTP_201_CREATED)
+#
+#         except Exception as e:
+#             # 🚨 SI L'API MOBILE MONEY PLANTE (ex: Orange/MTN est hors ligne)
+#             # On passe notre trace locale en ECHEC pour que la compta soit propre
+#             paiement.statut = Paiement.STATUT_ECHEC
+#             paiement.save(update_fields=['statut'])
+#
+#             return Response(
+#                 {"error": "Le service de paiement mobile est temporairement indisponible.", "details": str(e)},
+#                 status=status.HTTP_503_SERVICE_UNAVAILABLE
+#             )
+
 class InitiationPaiementView(APIView):
     """
-    Vue dédiée EXCLUSIVEMENT à l'initiation d'un paiement Mobile Money.
+    Vue dédiée à l'initiation d'un paiement Mobile Money (Supporte le paiement par Lot/Batch).
     Endpoint: POST /api/v1/initier-paiement/
     """
     permission_classes = [IsAuthenticated]
 
     def post(self, request, *args, **kwargs):
-        # 1. Validation des données d'entrée
+        # 1. Validation des données d'entrée (Le Serializer valide le tableau de lignes)
         serializer = InitiationPaiementSerializer(data=request.data, context={'request': request})
         serializer.is_valid(raise_exception=True)
 
-        lease = serializer.validated_data['lease_id']
-        montant = serializer.validated_data['montant']
+        lignes = serializer.validated_data['lignes']
         phone_number = serializer.validated_data.get('phone_number')
 
-        # 2. Génération de la référence d'audit interne
-        reference_interne = Paiement.generer_reference_paiement(Paiement.METHODE_MOBILE_MONEY)
+        # 2. Calcul du montant TOTAL à facturer via Mobile Money
+        total_montant = sum(ligne['montant'] for ligne in lignes)
 
-        # 3. 🛡️ SAUVEGARDE LOCALE D'ABORD (Garantit qu'on garde une trace quoi qu'il arrive)
-        paiement = Paiement.objects.create(
-            contrat=lease.contrat,
-            lease=lease,
-            utilisateur=request.user,
-            compte_id=request.user.compte_id,
-            montant=montant,
-            methode=Paiement.METHODE_MOBILE_MONEY,
-            reference=reference_interne,
-            statut=Paiement.STATUT_EN_ATTENTE  # Reste en attente
-        )
+        # 3. Génération d'une référence UNIQUE pour le Ticket de caisse global (Parent)
+        # En passant "SESSION", la méthode va extraire "SES" comme préfixe
+        reference_session = Paiement.generer_reference_paiement("SESSION")
 
-        # 4. APPEL AU FOURNISSEUR MOBILE MONEY
+        # 4. 🛡️ SAUVEGARDE LOCALE : Création du Parent puis des Enfants
         try:
+            with transaction.atomic():
+                # A. On crée le Parent (La transaction MTN/Orange)
+                session = SessionPaiement.objects.create(
+                    reference=reference_session,
+                    montant_total=total_montant,
+                    telephone=phone_number,
+                    utilisateur=request.user,
+                    compte_id=request.user.compte_id,
+                    statut=SessionPaiement.STATUT_EN_ATTENTE
+                )
+
+                # B. On crée les Enfants (Les reçus comptables internes)
+                for ligne in lignes:
+                    Paiement.objects.create(
+                        session=session,  # 🔗 LE LIEN MAGIQUE EST ICI
+                        contrat=ligne['lease_id'].contrat,
+                        lease=ligne['lease_id'],
+                        utilisateur=request.user,
+                        compte_id=request.user.compte_id,
+                        montant=ligne['montant'],
+                        methode=Paiement.METHODE_MOBILE_MONEY,
+
+                        # Chaque ligne garde sa propre référence unique !
+                        reference=Paiement.generer_reference_paiement(Paiement.METHODE_MOBILE_MONEY)
+
+
+                    )
+        except Exception as e:
+            return Response(
+                {"error": "Erreur interne lors de la préparation du panier.", "details": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+        # 5. APPEL AU FOURNISSEUR MOBILE MONEY
+        try:
+            # 🚀 On envoie la Session (Le Parent) au fournisseur, pas les lignes !
             pay_response = MobilePaymentService.initier_checkout(
-                montant=montant,
-                external_reference=reference_interne,
+                montant=total_montant,
+                external_reference=session.reference,
                 phone_number=phone_number
             )
 
-            # Mise à jour avec les infos de l'opérateur
-            paiement.transaction_id = pay_response.get('transaction_id')
-            paiement.save(update_fields=['transaction_id'])
+            # Succès : On met à jour UNIQUEMENT le Parent avec l'ID du fournisseur
+            session.transaction_id = pay_response.get('transaction_id')
+            session.save(update_fields=['transaction_id'])
 
-            # 5. Réponse de succès au Front-End
             return Response({
                 "success": True,
-                "message": "Session de paiement créée avec succès.",
-                "paiement_id": paiement.id,
-                "reference": paiement.reference,
+                "message": f"Session de paiement créée pour {len(lignes)} échéance(s).",
+                "reference_session": session.reference,
+                "montant_total": total_montant,
                 "redirect_url": pay_response.get('redirect_url'),
                 "session_token": pay_response.get('session_token')
             }, status=status.HTTP_201_CREATED)
 
         except Exception as e:
-            # 🚨 SI L'API MOBILE MONEY PLANTE (ex: Orange/MTN est hors ligne)
-            # On passe notre trace locale en ECHEC pour que la compta soit propre
-            paiement.statut = Paiement.STATUT_ECHEC
-            paiement.save(update_fields=['statut'])
+            # 🚨 ECHEC : Le fournisseur est injoignable, on passe UNIQUEMENT le Parent en ECHEC
+            # Les enfants (Paiements) renverront "ECHEC" automatiquement grâce à la @property
+            session.statut = SessionPaiement.STATUT_ECHEC
+            session.save(update_fields=['statut'])
 
             return Response(
                 {"error": "Le service de paiement mobile est temporairement indisponible.", "details": str(e)},
@@ -219,7 +309,77 @@ class InitiationPaiementView(APIView):
             )
 
 
-class MobilePaymentWebhookView(APIView):
+# class MobilePaymentWebhookView(APIView):
+#     permission_classes = [AllowAny]
+#
+#     def post(self, request, *args, **kwargs):
+#         signature_recue = request.headers.get('X-Signature')
+#         body_brut = request.body
+#
+#         if not signature_recue:
+#             return Response({"error": "Missing signature"}, status=400)
+#
+#         # 🚀 PROPRETÉ : Lecture sécurisée des settings sans os.getenv
+#         secret = getattr(settings, 'PAYMENT_WEBHOOK_SECRET', '')
+#
+#         signature_calculee = hmac.new(
+#             secret.encode('utf-8'),
+#             body_brut,
+#             hashlib.sha1
+#         ).hexdigest()
+#
+#         if not hmac.compare_digest(signature_recue, signature_calculee):
+#             return Response({"error": "Invalid signature"}, status=403)
+#
+#         try:
+#             payload = json.loads(body_brut)
+#         except json.JSONDecodeError:
+#             return Response({"error": "Invalid JSON"}, status=400)
+#
+#         transaction_id = payload.get('transaction_id')
+#         external_reference = payload.get('external_reference')
+#         statut_gateway = payload.get('status')
+#
+#         try:
+#             # 🚀 PERFORMANCE : select_related évite 2 requêtes SQL supplémentaires plus bas
+#             paiement = Paiement.objects.select_related('contrat', 'lease').get(reference=external_reference)
+#         except Paiement.DoesNotExist:
+#             return Response({"error": "Payment not found"}, status=404)
+#
+#         if paiement.statut in [Paiement.STATUT_VALIDE, Paiement.STATUT_ECHEC]:
+#             return Response({"status": "Already processed"}, status=200)
+#
+#         with transaction.atomic():
+#             paiement.webhook_payload = payload
+#
+#             if statut_gateway == "SUCCESS":
+#                 paiement.statut = Paiement.STATUT_VALIDE
+#                 paiement.date_paiement = timezone.now()
+#                 paiement.transaction_id = transaction_id
+#                 paiement.save()
+#
+#                 lease = paiement.lease
+#                 lease.montant_paye += paiement.montant
+#                 lease.statut = Lease.STATUT_PAYE if lease.montant_paye >= lease.montant_attendu else Lease.STATUT_PARTIEL
+#                 lease.save()
+#
+#                 contrat = paiement.contrat
+#                 # 🚀 INTÉGRITÉ FINANCIÈRE : Bloque à zéro et solde automatiquement
+#                 contrat.montant_restant = max(contrat.montant_restant - paiement.montant, Decimal('0.00'))
+#
+#                 if contrat.montant_restant == 0:
+#                     contrat.statut = Contrat.STATUT_SOLDE  # Adapte selon tes constantes
+#
+#                 contrat.save()
+#
+#             else:
+#                 paiement.statut = Paiement.STATUT_ECHEC
+#                 paiement.save()
+#
+#         return Response({"status": "Webhook acknowledged"}, status=200)
+
+
+class WebhookView(APIView):
     permission_classes = [AllowAny]
 
     def post(self, request, *args, **kwargs):
@@ -229,8 +389,7 @@ class MobilePaymentWebhookView(APIView):
         if not signature_recue:
             return Response({"error": "Missing signature"}, status=400)
 
-        # 🚀 PROPRETÉ : Lecture sécurisée des settings sans os.getenv
-        secret = getattr(settings, 'PAYMENT_WEBHOOK_SECRET', '')
+        secret = getattr(settings, 'PAYMENT_WEBHOOK_SECRET', '').strip()
 
         signature_calculee = hmac.new(
             secret.encode('utf-8'),
@@ -248,43 +407,42 @@ class MobilePaymentWebhookView(APIView):
 
         transaction_id = payload.get('transaction_id')
         external_reference = payload.get('external_reference')
-        statut_gateway = payload.get('status')
 
+        # 🚀 On s'assure de mettre en majuscule pour éviter les bugs (ex: "Failed" au lieu de "FAILED")
+        statut_gateway = str(payload.get('status', '')).upper()
+
+        # Recherche de la session
         try:
-            # 🚀 PERFORMANCE : select_related évite 2 requêtes SQL supplémentaires plus bas
-            paiement = Paiement.objects.select_related('contrat', 'lease').get(reference=external_reference)
-        except Paiement.DoesNotExist:
-            return Response({"error": "Payment not found"}, status=404)
+            session = SessionPaiement.objects.get(reference=external_reference)
+        except SessionPaiement.DoesNotExist:
+            return Response({"error": "Session not found"}, status=404)
 
-        if paiement.statut in [Paiement.STATUT_VALIDE, Paiement.STATUT_ECHEC]:
+        # Idempotence : Si déjà traité, on arrête ici
+        if session.statut in [SessionPaiement.STATUT_VALIDE, SessionPaiement.STATUT_ECHEC]:
             return Response({"status": "Already processed"}, status=200)
 
-        with transaction.atomic():
-            paiement.webhook_payload = payload
+        # On garde toujours une trace de ce que PayGate a envoyé
+        session.webhook_payload = payload
 
-            if statut_gateway == "SUCCESS":
-                paiement.statut = Paiement.STATUT_VALIDE
-                paiement.date_paiement = timezone.now()
-                paiement.transaction_id = transaction_id
-                paiement.save()
+        # 🚀 GESTION STRICTE DES STATUTS PAYGATE
+        if statut_gateway == "SUCCESS":
+            session.statut = SessionPaiement.STATUT_VALIDE
+            session.date_validation = timezone.now()
+            session.transaction_id = transaction_id
+            logger.info(f"[Webhook] SUCCÈS - Session {external_reference} validée.")
+            session.save()  # Déclenche le signal de validation
 
-                lease = paiement.lease
-                lease.montant_paye += paiement.montant
-                lease.statut = Lease.STATUT_PAYE if lease.montant_paye >= lease.montant_attendu else Lease.STATUT_PARTIEL
-                lease.save()
+        elif statut_gateway == "FAILED":
+            session.statut = SessionPaiement.STATUT_ECHEC
+            logger.warning(f"[Webhook] ÉCHEC - Session {external_reference} refusée par PayGate.")
+            session.save()  # Déclenche le signal d'échec
 
-                contrat = paiement.contrat
-                # 🚀 INTÉGRITÉ FINANCIÈRE : Bloque à zéro et solde automatiquement
-                contrat.montant_restant = max(contrat.montant_restant - paiement.montant, Decimal('0.00'))
-
-                if contrat.montant_restant == 0:
-                    contrat.statut = Contrat.STATUT_SOLDE  # Adapte selon tes constantes
-
-                contrat.save()
-
-            else:
-                paiement.statut = Paiement.STATUT_ECHEC
-                paiement.save()
+        else:
+            # Sécurité : Si PayGate envoie "PENDING" ou un nouveau statut inconnu
+            logger.warning(
+                f"[Webhook] STATUT IGNORE - Session {external_reference} a reçu un statut inattendu : {statut_gateway}")
+            # On sauvegarde juste le payload, mais on ne change pas le statut "EN_ATTENTE"
+            session.save(update_fields=['webhook_payload'])
 
         return Response({"status": "Webhook acknowledged"}, status=200)
 

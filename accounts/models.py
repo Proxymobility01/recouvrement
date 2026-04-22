@@ -68,6 +68,9 @@ class CustomUser(AbstractBaseUser, BaseModel):
             models.Index(fields=["compte_id", "is_active"]),
             models.Index(fields=["keycloak_id"], name="idx_rec_user_kc_id"),
         ]
+        permissions = [
+            ("view_all_users", "Peut voir tous les utilisateurs de son entreprise (Tenant)"),
+        ]
 
     def __str__(self):
         return self.nom_complet or self.keycloak_id

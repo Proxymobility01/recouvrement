@@ -28,9 +28,9 @@ class Command(BaseCommand):
         # Ils ont tous les droits sur les contrats, MAIS aucune modification/suppression
         # n'est autorisée sur les paiements. Ils doivent annuler et recréer.
         partner_perms = list(Permission.objects.filter(
-            content_type__app_label='recouvrement'
+            content_type__app_label__in=['recouvrement', 'accounts']
         ).exclude(
-            codename__in=['change_paiement', 'delete_paiement','delete_lease']
+            codename__in=['change_paiement', 'delete_paiement','delete_lease','delete_customuser']
         ))
 
         # Permissions DRIVER :
