@@ -1,7 +1,7 @@
 # Fichiers d'environnement (LE PLUS IMPORTANT)
 .env
 .env.*
-
+logs/
 # Git
 .git
 .gitignore
