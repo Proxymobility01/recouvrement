@@ -55,9 +55,7 @@ COPY . .
 RUN sed -i 's/\r$//g' /home/django/entrypoint.sh && \
     chmod +x /home/django/entrypoint.sh
 
-# Création des dossiers pour les fichiers statiques et médias
-RUN mkdir -p /home/django/staticfiles /home/django/media && \
-    chown -R django:django /home/django
+RUN chown -R django:django /home/django
 
 # Changement d'utilisateur
 USER django
