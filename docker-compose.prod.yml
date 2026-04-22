@@ -27,11 +27,6 @@ services:
     command: gunicorn config.wsgi:application -c gunicorn.conf.py
     env_file:
       - .env
-    environment:
-      - RUN_MIGRATIONS=True
-      - COLLECT_STATIC=True
-      - INIT_ROLES=False
-      - INIT_SYSTEM=False
     ports:
       - "127.0.0.1:9100:8000"
     volumes:
