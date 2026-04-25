@@ -43,10 +43,7 @@ class GestionChauffeurViewSet(TenantModelViewSet):
     """
     queryset = User.objects.all()
     serializer_class = GestionChauffeurSerializer
-
-
     permission_classes = [IsAuthenticated, DjangoModelPermissions]
-
     def get_queryset(self):
         # 1. Le TenantModelViewSet isole déjà par 'compte_id'
         qs = super().get_queryset()

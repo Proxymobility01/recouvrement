@@ -51,7 +51,7 @@ class ContratSerializer(serializers.ModelSerializer):
 
         # 1. Synchronisation du nom
         if chauffeur:
-            validated_data['nom_complet'] = chauffeur.nom_complet
+            validated_data['nom_complet'] = chauffeur.nom_complet or chauffeur.email or "Nom pas défini "
 
         # 2. Initialisations automatiques de base
         validated_data['montant_restant'] = validated_data.get('montant_total')
