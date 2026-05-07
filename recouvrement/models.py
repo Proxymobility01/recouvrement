@@ -20,7 +20,9 @@ class TypeContrat(BaseModel):
     Permet de créer des types de contrats à l'infini (GPS, Parapluie, etc.)
     """
     libelle = models.CharField(max_length=100)
-    code = models.SlugField(max_length=100, unique=True)
+
+    # 🚀 CORRECTION : On retire unique=True pour laisser la UniqueConstraint faire le job Multi-Tenant
+    code = models.SlugField(max_length=100)
 
     est_principal = models.BooleanField(
         default=False,
@@ -28,16 +30,24 @@ class TypeContrat(BaseModel):
     )
 
     class Meta:
-        constraints = [
-            models.UniqueConstraint(fields=['libelle', 'code','compte_id'], name='unique_type_contrat')
-        ]
         db_table = "recouvrement_type_contrat"
+        constraints = [
+            # 🚀 C'est elle qui garantit l'unicité par entreprise !
+            models.UniqueConstraint(fields=['code', 'compte_id'], name='unique_type_contrat_code_par_compte')
+        ]
+
     def save(self, *args, **kwargs):
-        self.nom = (self.libelle or "").strip().upper()
+        if self.code:
+            self.code = self.code.strip().upper()
+        if self.libelle:
+            self.libelle = self.libelle.strip()
+
         super().save(*args, **kwargs)
 
     def __str__(self):
         return self.libelle
+
+
 class Contrat(BaseModel):
     # --- Constantes de Statut ---
     STATUT_ACTIF = 'ACTIF'

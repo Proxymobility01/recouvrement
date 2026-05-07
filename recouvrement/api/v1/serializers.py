@@ -7,7 +7,7 @@ from rest_framework import serializers
 
 from core.errors import ErrorCodes
 from core.exceptions import CustomAPIException
-from recouvrement.models import Contrat, Lease, Paiement
+from recouvrement.models import Contrat, Lease, Paiement, TypeContrat
 
 
 # class ContratSerializer(serializers.ModelSerializer):
@@ -108,6 +108,66 @@ class SousContratSerializer(serializers.ModelSerializer):
             'prochaine_echeance': {'required': True},
             'date_fin': {'required': True},
         }
+
+
+class TypeContratSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = TypeContrat
+        fields = [
+            'id',
+            'libelle',
+            'code',
+            'est_principal',
+            'created_at',
+            'updated_at'
+        ]
+        read_only_fields = ['created_at', 'updated_at']
+
+    def validate_code(self, value):
+        """
+        Force le formatage du code et vérifie l'unicité par compte.
+        """
+        code_formate = value.strip().upper()
+
+        request = self.context.get('request')
+        if request and request.user:
+            compte_id = request.user.compte_id
+
+            qs = TypeContrat.objects.filter(code=code_formate, compte_id=compte_id)
+
+            if self.instance:
+                qs = qs.exclude(id=self.instance.id)
+
+            if qs.exists():
+                raise serializers.ValidationError(f"Le code '{code_formate}' existe déjà dans votre espace.")
+
+        return code_formate
+
+    def validate_libelle(self, value):
+        """
+        Nettoie le libellé et vérifie qu'aucun autre type de contrat
+        ne porte le même nom (insensible à la casse) pour ce compte.
+        """
+        # On supprime les espaces inutiles au début et à la fin
+        libelle_formate = value.strip()
+
+        request = self.context.get('request')
+        if request and request.user:
+            compte_id = request.user.compte_id
+
+            # 🚀 Utilisation de __iexact pour éviter les doublons type "Moto" vs "moto"
+            qs = TypeContrat.objects.filter(libelle__iexact=libelle_formate, compte_id=compte_id)
+
+            # Si c'est une modification, on exclut la ligne actuelle
+            if self.instance:
+                qs = qs.exclude(id=self.instance.id)
+
+            if qs.exists():
+                raise serializers.ValidationError(f"Le type de contrat '{libelle_formate}' existe déjà dans votre espace.")
+
+        # On retourne la valeur formatée (ex: "Traceur GPS" sans espaces superflus)
+        # On pourrait aussi faire libelle_formate.capitalize() si tu veux forcer la majuscule !
+        return libelle_formate
 
 
 class ContratSerializer(serializers.ModelSerializer):

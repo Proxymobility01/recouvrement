@@ -17,13 +17,14 @@ from rest_framework.permissions import IsAuthenticated, DjangoModelPermissions, 
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from core.filters import LeaseFilter
 from core.pagination import StandardResultsSetPagination
 from core.views import TenantModelViewSet
 from core.exceptions import CustomAPIException
 from core.errors import ErrorCodes
 from .serializers import ContratSerializer, LeaseSerializer, InitiationPaiementSerializer, PaiementSerializer, \
-    CalendrierSerializer
-from ...models import Contrat, Paiement, Lease, SessionPaiement
+    CalendrierSerializer, TypeContratSerializer
+from ...models import Contrat, Paiement, Lease, SessionPaiement, TypeContrat
 from ...services import MobilePaymentService
 
 logger = logging.getLogger(__name__)
@@ -121,7 +122,7 @@ class LeaseViewSet(TenantModelViewSet):
     serializer_class = LeaseSerializer
     pagination_class = StandardResultsSetPagination
     permission_classes = [IsAuthenticated, DjangoModelPermissions]
-    # filterset_class =
+    filterset_class = LeaseFilter
 
     # Configuration des filtres pour le tableau de bord
     filter_backends = [DjangoFilterBackend, filters.OrderingFilter, filters.SearchFilter]
@@ -421,3 +422,40 @@ class PaiementViewSet(TenantModelViewSet):
             status_code=403,
             context=f"ID Paiement={instance.id}"
         )
+
+
+class TypeContratViewSet(TenantModelViewSet):
+    """
+    API pour la gestion du dictionnaire des types de contrats (Véhicules, Accessoires...).
+    """
+    queryset = TypeContrat.objects.all()
+    serializer_class = TypeContratSerializer
+    permission_classes = [IsAuthenticated, DjangoModelPermissions]
+
+    # Configuration des filtres et recherches
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+
+    # Utile pour afficher une liste déroulante "Sélectionnez l'accessoire" (est_principal=False)
+    filterset_fields = ['est_principal']
+
+    search_fields = ['libelle', 'code']
+    ordering_fields = ['libelle', 'created_at']
+    ordering = ['libelle']
+
+    def get_queryset(self):
+        # Isolation multi-tenant gérée par le parent
+        return super().get_queryset()
+
+    def perform_destroy(self, instance):
+        """
+        Protection pour éviter de casser la base de données.
+        Si un 'TypeContrat' est lié à au moins un 'Contrat', on interdit la suppression.
+        """
+        # "contrats" correspond au related_name='contrats' dans ton modèle Contrat
+        if instance.contrats.exists():
+            raise CustomAPIException(
+                resp_code=ErrorCodes.TYPE_CONTRAT_DELETE_FORBIDDEN,
+                status_code=403,
+                context=f"Impossible de supprimer le type '{instance.libelle}' car il est utilisé par {instance.contrats.count()} contrat(s)."
+            )
+        super().perform_destroy(instance)

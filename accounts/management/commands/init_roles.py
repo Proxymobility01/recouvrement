@@ -1,3 +1,4 @@
+from django.contrib.contenttypes.models import ContentType
 from django.core.management.base import BaseCommand
 from django.contrib.auth.models import Permission
 from django.apps import apps
@@ -17,6 +18,8 @@ class Command(BaseCommand):
         for app_config in apps.get_app_configs():
             create_permissions(app_config, verbosity=0, using=DEFAULT_DB_ALIAS)
 
+        ContentType.objects.clear_cache()
+
         self.stdout.write(self.style.WARNING("Synchronisation des permissions terminée.\n"))
 
         # ==========================================
@@ -35,6 +38,12 @@ class Command(BaseCommand):
 
         # Permissions DRIVER :
         # Lecture des contrats/paiements et initiation de paiements.
+
+        if not partner_perms:
+            self.stdout.write(self.style.ERROR(
+                "🚨 ERREUR CRITIQUE : Aucune permission trouvée pour 'partner_perms' ! Vérifie le nom de tes applications (app_label)."))
+            return
+
         driver_perms = list(Permission.objects.filter(
             content_type__app_label='recouvrement',
             codename__in=[
@@ -44,6 +53,11 @@ class Command(BaseCommand):
                 'view_lease'
             ]
         ))
+
+        if not driver_perms:
+            self.stdout.write(self.style.ERROR(
+                "🚨 ERREUR CRITIQUE : Aucune permission trouvée pour 'driver_perms' ! Vérifie tes codenames (ex: view_contrat vs view_contrats)."))
+            return
 
         # ==========================================
         # 3. DÉFINITION ET CRÉATION DES RÔLES
