@@ -1,10 +1,12 @@
 # Create your models here.
 from django.contrib.auth.base_user import AbstractBaseUser
 from django.contrib.auth.models import Permission
+from django.contrib.postgres.indexes import GinIndex
 from django.db import models
 from django.core.exceptions import ValidationError
 from django.db.models import Q
 from accounts.managers import CustomUserManager
+from core.utils import remove_accents
 
 
 class BaseModel(models.Model):
@@ -38,15 +40,13 @@ class Role(models.Model):
 
 
 class CustomUser(AbstractBaseUser, BaseModel):
-    keycloak_id = models.CharField("Keycloak ID", max_length=255, unique=True, db_index=True)
+    keycloak_id = models.CharField("Keycloak ID", max_length=255, unique=True)
 
     email = models.EmailField("Email", null=True, blank=True)
-    nom_complet = models.CharField("Nom Complet", max_length=255, null=True, blank=True)
-
+    nom_complet = models.CharField("Nom Complet", max_length=255)
+    nom_complet_search = models.CharField( max_length=255, null=True, blank=True)
     is_active = models.BooleanField("Actif", default=True)
     is_staff = models.BooleanField("Accès Admin", default=False)
-
-    # Remplace PermissionsMixin : Indispensable pour l'Admin Django
     is_superuser = models.BooleanField("Super Admin", default=False)
 
     roles = models.ManyToManyField(
@@ -67,9 +67,17 @@ class CustomUser(AbstractBaseUser, BaseModel):
         indexes = [
             models.Index(fields=["compte_id", "is_active"]),
             models.Index(fields=["keycloak_id"], name="idx_rec_user_kc_id"),
+            GinIndex(fields=['nom_complet_search'], name='idx_user_search_trgm', opclasses=['gin_trgm_ops']),
         ]
         permissions = [
             ("view_all_users", "Peut voir tous les utilisateurs de son entreprise (Tenant)"),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['email'],
+                condition=~Q(email__isnull=True) & ~Q(email__exact=''),  # S'applique si non-null ET non-vide
+                name='unique_email_if_not_null'
+            )
         ]
 
     def __str__(self):
@@ -82,6 +90,20 @@ class CustomUser(AbstractBaseUser, BaseModel):
 
     def has_role(self, slug: str) -> bool:
         return self.roles.filter(slug=slug, assignations_utilisateurs__actif=True).exists()
+
+    def save(self, *args, **kwargs):
+        # 🚀 CORRECTION 2 : Éviter le bug "None" et passer en minuscules
+        if self.nom_complet:
+            self.nom_complet_search = remove_accents(self.nom_complet).lower()
+        else:
+            self.nom_complet_search = ""
+        update_fields = kwargs.get('update_fields')
+        if update_fields is not None and 'nom_complet' in update_fields:
+            update_fields = set(update_fields)
+            update_fields.add('nom_complet_search')
+            kwargs['update_fields'] = list(update_fields)
+
+        super().save(*args, **kwargs)
 
     # ==========================================
     # SURCHARGE DES PERMISSIONS DJANGO
@@ -159,9 +181,6 @@ class CustomUserRole(BaseModel):
             )
         ]
         indexes = [
-            models.Index(fields=["compte_id", "user"]),
-            models.Index(fields=["compte_id", "role"]),
-            models.Index(fields=["user", "role"]),
             models.Index(fields=["compte_id", "actif"]),
         ]
 

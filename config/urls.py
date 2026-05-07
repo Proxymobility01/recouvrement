@@ -19,6 +19,9 @@ from django.urls import path, include
 
 urlpatterns = [
     path('admin/', admin.site.urls),
-path('api/v1/', include('recouvrement.api.v1.urls')),
+    path('api/v1/', include('recouvrement.api.v1.urls')),
     path('api/v1/accounts/', include('accounts.api.v1.urls')),
 ]
+
+handler404 = 'core.exceptions.custom_404_handler'
+handler500 = 'core.exceptions.custom_500_handler'
