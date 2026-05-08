@@ -478,6 +478,24 @@ class TypeContratViewSet(TenantModelViewSet):
         # Isolation multi-tenant gérée par le parent
         return super().get_queryset()
 
+    def perform_create(self, serializer):
+        """
+        Injecte automatiquement le compte_id de l'utilisateur connecté
+        lors de la création du type de contrat.
+        """
+        # On récupère le compte_id depuis l'utilisateur qui fait la requête
+        serializer.save(compte_id=self.request.user.compte_id)
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        self.perform_create(serializer)
+
+        return Response({
+            "message": "Type de contrat créé avec succès.",
+            "id": serializer.instance.id,
+            "code": serializer.instance.code
+        }, status=status.HTTP_201_CREATED)
+
     def perform_destroy(self, instance):
         """
         Protection pour éviter de casser la base de données.
