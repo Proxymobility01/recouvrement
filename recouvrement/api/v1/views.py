@@ -17,7 +17,7 @@ from rest_framework.permissions import IsAuthenticated, DjangoModelPermissions, 
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from core.filters import LeaseFilter
+from core.filters import LeaseFilter, ContratFilter, PaiementFilter
 from core.pagination import StandardResultsSetPagination
 from core.views import TenantModelViewSet
 from core.exceptions import CustomAPIException
@@ -34,6 +34,12 @@ class ContratViewSet(TenantModelViewSet):
     queryset = Contrat.objects.all()
     serializer_class = ContratSerializer
     permission_classes = [IsAuthenticated, DjangoModelPermissions]
+    pagination_class = StandardResultsSetPagination
+    filter_backends = [filters.SearchFilter, filters.OrderingFilter, DjangoFilterBackend]
+    filterset_class = ContratFilter
+    search_fields = ['reference', 'vin', 'immatriculation', 'chauffeur__nom_complet','enregistre_par__nom_complet']
+    ordering_fields = ['created_at', 'statut',]
+    ordering = ['-created_at']
     def get_queryset(self):
         qs = super().get_queryset().select_related('chauffeur', 'enregistre_par','type_contrat')
         user = self.request.user
@@ -65,13 +71,33 @@ class ContratViewSet(TenantModelViewSet):
 
     def perform_destroy(self, instance):
         """
-        Interdiction absolue de supprimer un contrat de la base de données.
+        Suppression autorisée UNIQUEMENT si le contrat est "vierge" (aucune dépendance).
         """
-        raise CustomAPIException(
-            resp_code=ErrorCodes.CONTRACT_DELETE_FORBIDDEN,
-            status_code=403,
-            context=f"ID Contrat={instance.id}"
-        )
+        raisons_blocage = []
+
+        # 1. Vérification des sous-contrats (S'il est parent, il protège ses enfants)
+        if instance.sous_contrats.exists():
+            raisons_blocage.append(f"{instance.sous_contrats.count()} sous-contrat(s) rattaché(s)")
+
+        # 2. Vérification des échéances (Leases)
+        if hasattr(instance, 'leases') and instance.leases.exists():
+            raisons_blocage.append(f"{instance.leases.count()} échéance(s) générée(s)")
+
+        # 3. Vérification des paiements (grâce à ton related_name="paiements")
+        if hasattr(instance, 'paiements') and instance.paiements.exists():
+            raisons_blocage.append(f"{instance.paiements.count()} paiement(s) effectué(s)")
+
+        # S'il y a la moindre dépendance, on déclenche l'erreur avec le détail précis
+        if raisons_blocage:
+            details = " et ".join(raisons_blocage)
+            raise CustomAPIException(
+                resp_code=ErrorCodes.CONTRACT_DELETE_FORBIDDEN,
+                status_code=403,
+                context=f"Impossible de supprimer le contrat {instance.reference}. Il est déjà lié à : {details}."
+            )
+
+        # Si la liste est vide, c'est que le contrat est "vierge". On peut le supprimer !
+        super().perform_destroy(instance)
 
     @action(detail=False, methods=['get'], url_path='impayes-du-jour')
     def impayes_du_jour(self, request):
@@ -82,6 +108,12 @@ class ContratViewSet(TenantModelViewSet):
         """
         aujourdhui = timezone.now().date()
         user = request.user
+        if not user.is_superuser:
+            raise CustomAPIException(
+                resp_code=ErrorCodes.PERMISSION_DENIED,  # Assure-toi d'avoir ce code dans tes erreurs
+                status_code=403,
+                context="Accès refusé. Cette action est strictement réservée au Super-Administrateur."
+            )
 
         # 1. LA REQUÊTE CIBLÉE (Ultra-rapide)
         # On cherche uniquement les contrats PARENTS actifs
@@ -383,8 +415,8 @@ class PaiementViewSet(TenantModelViewSet):
     permission_classes = [IsAuthenticated, DjangoModelPermissions]
 
     filter_backends = [DjangoFilterBackend, filters.OrderingFilter, filters.SearchFilter]
-    filterset_fields = ['statut', 'methode', 'lease']
-    search_fields = ['reference', 'transaction_id', 'contrat__nom_complet']
+    filter_class = PaiementFilter
+    search_fields = ['reference', 'nom_complet_search', '^session__telephone',]
     ordering_fields = ['date_paiement', 'created_at']
     ordering = ['-date_paiement']
 

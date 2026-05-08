@@ -386,7 +386,7 @@ class Paiement(BaseModel):
 
     contrat = models.ForeignKey(Contrat, on_delete=models.PROTECT, related_name="paiements")
     lease = models.ForeignKey(Lease, on_delete=models.PROTECT, related_name="paiements", null=True, blank=True)
-    utilisateur = models.ForeignKey(CustomUser, on_delete=models.PROTECT, related_name="paiements_effectues")
+    enregistre_par = models.ForeignKey(CustomUser, on_delete=models.PROTECT, related_name="paiements_effectues")
 
     # 🚀 CORRECTION 1 : null=True est INDISPENSABLE pour que les espèces fonctionnent
     session = models.ForeignKey(

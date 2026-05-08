@@ -10,75 +10,6 @@ from core.exceptions import CustomAPIException
 from recouvrement.models import Contrat, Lease, Paiement, TypeContrat
 
 
-# class ContratSerializer(serializers.ModelSerializer):
-#     enregistre_par_nom_complet = serializers.CharField(source='enregistre_par.nom_complet', read_only=True)
-#     chauffeur_nom_complet = serializers.CharField(source='chauffeur.nom_complet', read_only=True)
-#
-#     class Meta:
-#         model = Contrat
-#         fields = [
-#             'id', 'compte_id', 'chauffeur', 'immatriculation', 'nom_complet',
-#             'enregistre_par', 'enregistre_par_nom_complet', 'chauffeur_nom_complet',
-#             'montant_total', 'montant_restant', 'montant_par_paiement',
-#             'frequence', 'date_debut', 'date_fin', 'prochaine_echeance',
-#             'statut', 'created_at', 'updated_at'
-#         ]
-#
-#         read_only_fields = [
-#             'statut', 'montant_restant', 'enregistre_par',
-#             'created_at', 'updated_at', 'nom_complet',
-#             'compte_id'
-#
-#         ]
-#
-#     def validate(self, attrs):
-#         montant_total = attrs.get('montant_total', getattr(self.instance, 'montant_total', None))
-#         montant_par_paiement = attrs.get('montant_par_paiement', getattr(self.instance, 'montant_par_paiement', None))
-#
-#         if montant_par_paiement and montant_total and montant_par_paiement > montant_total:
-#             raise serializers.ValidationError({
-#                 "montant_par_paiement": "L'échéance ne peut pas être supérieure au montant total."
-#             })
-#
-#         date_debut = attrs.get('date_debut', getattr(self.instance, 'date_debut', None))
-#         date_fin = attrs.get('date_fin', getattr(self.instance, 'date_fin', None))
-#
-#         if date_debut and date_fin and date_fin < date_debut:
-#             raise serializers.ValidationError({
-#                 "date_fin": "La date de fin ne peut pas précéder la date de début."
-#             })
-#
-#         return attrs
-#
-#     def create(self, validated_data):
-#         chauffeur = validated_data.get('chauffeur')
-#
-#         # 1. Synchronisation du nom
-#         if chauffeur:
-#             validated_data['nom_complet'] = chauffeur.nom_complet or "Nom pas défini "
-#
-#         # 2. Initialisations automatiques de base
-#         validated_data['montant_restant'] = validated_data.get('montant_total')
-#         validated_data['statut'] = Contrat.STATUT_ACTIF
-#
-#         # date_fin et prochaine_echeance sont gérés nativement par ModelSerializer
-#         # puisqu'ils sont fournis dans le body de la requête.
-#
-#         return super().create(validated_data)
-#
-#     def update(self, instance, validated_data):
-#         validated_data.pop('prochaine_echeance', None)
-#         chauffeur = validated_data.get('chauffeur')
-#         if chauffeur:
-#             validated_data['nom_complet'] = chauffeur.nom_complet
-#
-#         # Si le montant total change, on ajuste intelligemment le montant restant
-#         new_total = validated_data.get('montant_total')
-#         if new_total is not None and new_total != instance.montant_total:
-#             deja_paye = instance.montant_total - instance.montant_restant
-#             validated_data['montant_restant'] = max(0, new_total - deja_paye)
-#
-#         return super().update(instance, validated_data)
 
 class SousContratSerializer(serializers.ModelSerializer):
     """
@@ -455,7 +386,7 @@ class PaiementSerializer(serializers.ModelSerializer):
     )
 
     chauffeur_nom_complet = serializers.CharField(source='contrat.nom_complet', read_only=True)
-    enregistre_par = serializers.CharField(source='utilisateur.nom_complet', read_only=True)
+    enregistre_par = serializers.CharField(source='enregistre_par.nom_complet', read_only=True)
 
     class Meta:
         model = Paiement

@@ -1,7 +1,7 @@
 import django_filters
 from django_filters import rest_framework as filters
 
-from recouvrement.models import Lease
+from recouvrement.models import Lease, Contrat, Paiement
 
 
 class CharInFilter(django_filters.BaseInFilter, django_filters.CharFilter):
@@ -31,3 +31,96 @@ class LeaseFilter(filters.FilterSet):
         model = Lease
         fields = ['statut']
 
+
+class ContratFilter(filters.FilterSet):
+    # ==========================================
+    # 1. FILTRES MULTIPLES (IN)
+    # ==========================================
+    statut__in = CharInFilter(field_name='statut', lookup_expr='in')
+    frequence__in = CharInFilter(field_name='frequence', lookup_expr='in')
+
+    # ==========================================
+    # 2. RANGES DE DATES (_start et _end)
+    # ==========================================
+    # Date de début
+    date_debut_start = filters.DateFilter(field_name="date_debut", lookup_expr='gte')
+    date_debut_end = filters.DateFilter(field_name="date_debut", lookup_expr='lte')
+
+    # Date de fin
+    date_fin_start = filters.DateFilter(field_name="date_fin", lookup_expr='gte')
+    date_fin_end = filters.DateFilter(field_name="date_fin", lookup_expr='lte')
+
+    # Prochaine échéance
+    prochaine_echeance_start = filters.DateFilter(field_name="prochaine_echeance", lookup_expr='gte')
+    prochaine_echeance_end = filters.DateFilter(field_name="prochaine_echeance", lookup_expr='lte')
+
+    # ==========================================
+    # 3. FILTRES FINANCIERS (Bonus recommandé)
+    # ==========================================
+    # Très utile pour chercher les contrats qui ont presque fini de payer, ou les gros contrats
+    montant_restant_min = filters.NumberFilter(field_name="montant_restant", lookup_expr='gte')
+    montant_restant_max = filters.NumberFilter(field_name="montant_restant", lookup_expr='lte')
+
+    # ==========================================
+    # 4. RELATIONNELS
+    # ==========================================
+    type_contrat_id = filters.NumberFilter(field_name="type_contrat_id")
+
+    class Meta:
+        model = Contrat
+        # La liste "fields" permet de générer automatiquement les filtres d'égalité stricte
+        # Ex: ?statut=ACTIF ou ?frequence=JOURNALIER
+        fields = [
+            'statut',
+            'frequence',
+            'date_debut',
+            'date_fin',
+            'prochaine_echeance',
+            'montant_total',
+            'montant_par_paiement',
+            'montant_restant',
+        ]
+
+
+class PaiementFilter(filters.FilterSet):
+    # ==========================================
+    # 1. FILTRES MULTIPLES (IN)
+    # ==========================================
+    statut__in = CharInFilter(field_name='statut', lookup_expr='in')
+    methode__in = CharInFilter(field_name='methode', lookup_expr='in')
+
+    # ==========================================
+    # 2. RANGES DE DATES (_start et _end)
+    # ==========================================
+    # Filtrer par date effective du paiement (utilise __date car c'est un DateTimeField)
+    date_paiement_start = filters.DateFilter(field_name="date_paiement__date", lookup_expr='gte')
+    date_paiement_end = filters.DateFilter(field_name="date_paiement__date", lookup_expr='lte')
+    date_paiement = filters.DateFilter(field_name="date_paiement__date", lookup_expr='exact')
+
+    # Filtrer par date de création dans le système
+    created_at_start = filters.DateFilter(field_name="created_at__date", lookup_expr='gte')
+    created_at_end = filters.DateFilter(field_name="created_at__date", lookup_expr='lte')
+
+    # ==========================================
+    # 3. FILTRES FINANCIERS (Montants)
+    # ==========================================
+    montant_min = filters.NumberFilter(field_name="montant", lookup_expr='gte')
+    montant_max = filters.NumberFilter(field_name="montant", lookup_expr='lte')
+
+    # ==========================================
+    # 4. RELATIONNELS ET JOIN
+    # ==========================================
+    contrat_id = filters.NumberFilter(field_name="contrat_id")
+    lease_id = filters.NumberFilter(field_name="lease_id")
+    session_id = filters.NumberFilter(field_name="session_id")
+    enregistre_par_id = filters.NumberFilter(field_name="enregistre_par_id")
+    chauffeur_id = filters.NumberFilter(field_name="contrat__chauffeur_id")
+
+    class Meta:
+        model = Paiement
+        # Les filtres stricts générés automatiquement
+        fields = [
+            'statut',
+            'methode',
+            'est_annule',
+        ]
