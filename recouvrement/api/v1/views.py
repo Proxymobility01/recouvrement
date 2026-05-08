@@ -23,7 +23,7 @@ from core.views import TenantModelViewSet
 from core.exceptions import CustomAPIException
 from core.errors import ErrorCodes
 from .serializers import ContratSerializer, LeaseSerializer, InitiationPaiementSerializer, PaiementSerializer, \
-    CalendrierSerializer, TypeContratSerializer
+    CalendrierSerializer, TypeContratSerializer, SousContratSerializer
 from ...models import Contrat, Paiement, Lease, SessionPaiement, TypeContrat
 from ...services import MobilePaymentService
 
@@ -143,6 +143,53 @@ class ContratViewSet(TenantModelViewSet):
             "vehicules": resultats
         }, status=status.HTTP_200_OK)
 
+    @action(detail=True, methods=['post'], url_path='sous-contrats')
+    def sous_contrats(self, request, pk=None):
+        """
+        Ajoute un nouveau sous-contrat (accessoire) à un véhicule existant.
+        Endpoint: POST /api/v1/contrats/{id}/sous-contrats/
+        """
+        # 1. Récupération du contrat parent (la moto)
+        parent_contrat = self.get_object()
+
+        # 2. SÉCURITÉ : Empêcher d'ajouter un sous-contrat à un autre sous-contrat
+        if parent_contrat.parent is not None:
+            raise CustomAPIException(
+                resp_code=ErrorCodes.INVALID_REQUEST,
+                status_code=400,
+                context="Vous ne pouvez ajouter un sous-contrat qu'à un contrat principal."
+            )
+
+        # 3. Validation des données envoyées par le Front-End
+        serializer = SousContratSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        sc_instance_data = serializer.validated_data
+
+        # 4. Héritage automatique des données du parent (ADN du contrat)
+        sc_instance_data['parent'] = parent_contrat
+        sc_instance_data['chauffeur'] = parent_contrat.chauffeur
+        sc_instance_data['compte_id'] = parent_contrat.compte_id
+        sc_instance_data['nom_complet'] = parent_contrat.nom_complet
+
+        # Traçabilité
+        sc_instance_data['enregistre_par'] = request.user
+
+        # Initialisation
+        sc_instance_data['statut'] = Contrat.STATUT_ACTIF
+        sc_instance_data['montant_restant'] = sc_instance_data.get('montant_total')
+
+        # 5. Enregistrement en base de données
+        sous_contrat = Contrat.objects.create(**sc_instance_data)
+
+        # 6. Réponse pour le Front-End
+        return Response({
+            "message": "Sous-contrat ajouté avec succès.",
+            "id": sous_contrat.id,
+            "reference": sous_contrat.reference,
+            "parent_id": parent_contrat.id
+        }, status=status.HTTP_201_CREATED)
+
 
 class LeaseViewSet(TenantModelViewSet):
     """
@@ -247,8 +294,6 @@ class LeaseViewSet(TenantModelViewSet):
         return Response(resultat_final)
 
 
-
-
 class InitiationPaiementView(APIView):
     """
     Vue dédiée à l'initiation d'un paiement Mobile Money (Supporte le paiement par Lot/Batch).
@@ -340,7 +385,6 @@ class InitiationPaiementView(APIView):
             )
 
 
-
 class WebhookView(APIView):
     permission_classes = [AllowAny]
 
@@ -421,7 +465,7 @@ class PaiementViewSet(TenantModelViewSet):
     ordering = ['-date_paiement']
 
     def get_queryset(self):
-        qs = super().get_queryset().select_related('utilisateur', 'contrat', 'lease')
+        qs = super().get_queryset().select_related('enregistre_par', 'contrat', 'lease')
         user = self.request.user
 
         if user.is_superuser:
@@ -429,7 +473,10 @@ class PaiementViewSet(TenantModelViewSet):
         if user.has_perm('recouvrement.view_all_paiements'):
             return qs
 
-        return qs.filter(Q(contrat__chauffeur=user) | Q(utilisateur=user))
+        return qs.filter(Q(contrat__chauffeur=user) | Q(enregistre_par=user))
+
+    def perform_create(self, serializer):
+        serializer.save(enregistre_par=self.request.user)
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)

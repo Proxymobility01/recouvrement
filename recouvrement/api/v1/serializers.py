@@ -11,36 +11,6 @@ from recouvrement.models import Contrat, Lease, Paiement, TypeContrat
 
 
 
-class SousContratSerializer(serializers.ModelSerializer):
-    """
-    Serializer utilisé UNIQUEMENT en lecture pour afficher les enfants
-    dans le détail du parent, OU lors de la création groupée.
-    """
-    specificites = serializers.JSONField(required=False, allow_null=True)
-    montant_verse = serializers.DecimalField(
-        max_digits=12,
-        decimal_places=2,
-        read_only=True
-    )
-
-    class Meta:
-        model = Contrat
-        fields = [
-            'id','reference', 'type_contrat', 'montant_total','montant_restant','montant_verse', 'montant_par_paiement',
-            'frequence', 'date_debut', 'date_fin', 'prochaine_echeance',
-             'statut', 'specificites'
-        ]
-        read_only_fields = ['id', 'reference', 'statut', 'montant_restant']
-        extra_kwargs = {
-            'montant_total': {'required': True},
-            'montant_par_paiement': {'required': True},
-            'frequence': {'required': True},
-            'date_debut': {'required': True},
-            'prochaine_echeance': {'required': True},
-            'date_fin': {'required': True},
-        }
-
-
 class TypeContratSerializer(serializers.ModelSerializer):
     class Meta:
         model = TypeContrat
@@ -101,6 +71,48 @@ class TypeContratSerializer(serializers.ModelSerializer):
         return libelle_formate
 
 
+class SousContratSerializer(serializers.ModelSerializer):
+    """
+    Serializer utilisé UNIQUEMENT en lecture pour afficher les enfants
+    dans le détail du parent, OU lors de la création groupée.
+    """
+    specificites = serializers.JSONField(required=False, allow_null=True)
+    montant_verse = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        read_only=True
+    )
+
+    class Meta:
+        model = Contrat
+        fields = [
+            'id','reference', 'type_contrat', 'montant_total','montant_restant','montant_verse', 'montant_par_paiement',
+            'frequence', 'date_debut', 'date_fin', 'prochaine_echeance',
+             'statut', 'specificites'
+        ]
+        read_only_fields = ['id', 'reference', 'statut', 'montant_restant']
+        extra_kwargs = {
+            'montant_total': {'required': True},
+            'montant_par_paiement': {'required': True},
+            'frequence': {'required': True},
+            'date_debut': {'required': True},
+            'prochaine_echeance': {'required': True},
+            'date_fin': {'required': True},
+        }
+
+    def validate_type_contrat(self, value):
+        """
+        Vérifie qu'on n'essaie pas d'utiliser un type principal (ex: Véhicule)
+        pour créer un sous-contrat (accessoire).
+        """
+        if value.est_principal:
+            raise serializers.ValidationError(
+                f"Le type '{value.libelle}' est un contrat principal. Il ne peut pas être utilisé comme sous-contrat."
+            )
+        return value
+
+
+
 class ContratSerializer(serializers.ModelSerializer):
     enregistre_par_nom_complet = serializers.CharField(source='enregistre_par.nom_complet', read_only=True)
     chauffeur_nom_complet = serializers.CharField(source='chauffeur.nom_complet', read_only=True)
@@ -129,7 +141,26 @@ class ContratSerializer(serializers.ModelSerializer):
             'date_debut': {'required': True},
             'prochaine_echeance': {'required': True},
             'date_fin': {'required': True},
+            'vin':{'required': True,'allow_blank': False,'allow_null': False},
+            'immatriculation': {'required': True,'allow_blank': False,'allow_null': False},
         }
+
+    def validate_type_contrat(self, value):
+        """
+        Si ce Serializer est utilisé pour créer un contrat principal (pas de parent défini),
+        le type de contrat DOIT être principal.
+        """
+        # On vérifie si c'est une création de contrat principal
+        # (self.initial_data ne contient pas de 'parent' ou self.instance n'a pas de parent)
+        parent_id = self.initial_data.get('parent')
+        is_updating_sub_contract = self.instance and self.instance.parent is not None
+
+        if not parent_id and not is_updating_sub_contract:
+            if not value.est_principal:
+                raise serializers.ValidationError(
+                    f"Le type '{value.libelle}' est un accessoire. Il ne peut pas être utilisé comme contrat principal."
+                )
+        return value
 
     def validate(self, attrs):
         # 1. Validation Financière
@@ -448,7 +479,6 @@ class PaiementSerializer(serializers.ModelSerializer):
 
         validated_data['methode'] = Paiement.METHODE_ESPECES
         validated_data['contrat'] = lease.contrat
-        validated_data['utilisateur'] = user
         validated_data['compte_id'] = user.compte_id
         validated_data['statut'] = Paiement.STATUT_VALIDE
         validated_data['date_paiement'] = timezone.now()
