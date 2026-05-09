@@ -35,11 +35,11 @@ class StatistiqueJournaliereViewSet(TenantModelViewSet):
     # On bloque explicitement POST, PUT, PATCH et DELETE pour la sécurité.
     http_method_names = ['get', 'head', 'options']
 
-    @action(detail=False, methods=['get'], url_path='du-jour')
+    @action(detail=False, methods=['get'], url_path='jour')
     def du_jour(self, request):
         """
         Raccourci spécifiquement conçu pour le Dashboard principal.
-        Endpoint: GET /api/v1/statistiques/du-jour/
+        Endpoint: GET /api/v1/statistiques/jour/
         Avantage : Renvoie une structure propre avec des 0 si aucune stat n'existe encore.
         """
         aujourdhui = timezone.now().date()
