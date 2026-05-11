@@ -468,6 +468,25 @@ class Paiement(BaseModel):
         return f"Paiement {self.reference} - {self.montant}"
 
 
+class Parametre(BaseModel):
+    """
+    Configuration globale des règles métier pour une entreprise (tenant).
+    """
+    # Stocke une liste d'entiers. Ex: [6] pour Dimanche, [5, 6] pour le Week-end
+    jours_repos = models.JSONField(
+        default=list,
+        help_text="Liste des jours ignorés pour les échéances (0=Lundi, ..., 6=Dimanche). Ex: [6] pour sauter le dimanche."
+    )
+
+    class Meta:
+        db_table = "recouvrement_parametre"
+        constraints = [
+            # Une seule ligne de paramètres par entreprise !
+            models.UniqueConstraint(fields=['compte_id'], name='unique_param_par_compte')
+        ]
+
+    def __str__(self):
+        return f"Paramètres du compte {self.compte_id}"
 
 
 

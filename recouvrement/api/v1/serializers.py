@@ -1,5 +1,4 @@
 from decimal import Decimal
-
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
@@ -7,8 +6,7 @@ from rest_framework import serializers
 
 from core.errors import ErrorCodes
 from core.exceptions import CustomAPIException
-from recouvrement.models import Contrat, Lease, Paiement, TypeContrat
-
+from recouvrement.models import Contrat, Lease, Paiement, TypeContrat, Parametre
 
 
 class TypeContratSerializer(serializers.ModelSerializer):
@@ -110,7 +108,6 @@ class SousContratSerializer(serializers.ModelSerializer):
                 f"Le type '{value.libelle}' est un contrat principal. Il ne peut pas être utilisé comme sous-contrat."
             )
         return value
-
 
 
 class ContratSerializer(serializers.ModelSerializer):
@@ -296,6 +293,7 @@ class LeaseSerializer(serializers.ModelSerializer):
 
     def get_reste_a_payer(self, obj):
         return obj.montant_attendu - obj.montant_paye
+
 
 class CalendrierSerializer(serializers.ModelSerializer):
     chauffeur_nom = serializers.CharField(source='contrat.chauffeur.nom_complet', read_only=True, default="Inconnu")
@@ -552,3 +550,26 @@ class PaiementSerializer(serializers.ModelSerializer):
                 contrat.save()
 
         return super().update(instance, validated_data)
+
+
+class ParametreSerializer(serializers.ModelSerializer):
+    jours_repos = serializers.ListField(
+        child=serializers.IntegerField(min_value=0, max_value=6),
+        allow_empty=True,
+        help_text="Liste des jours de repos (0=Lundi, ..., 6=Dimanche)"
+    )
+
+    class Meta:
+        model = Parametre
+        fields = ['id', 'jours_repos', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def validate_jours_repos(self, value):
+        """
+        Nettoie la donnée :
+        Si le Front envoie [6, 0, 6], on le transforme proprement en [0, 6]
+        """
+        if value:
+            # set() enlève les doublons, sorted() les remet dans l'ordre (0 à 6)
+            return sorted(list(set(value)))
+        return []

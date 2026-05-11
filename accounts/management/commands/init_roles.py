@@ -49,7 +49,7 @@ class Command(BaseCommand):
             codename__in=[
                 'view_contrat',
                 'view_paiement',
-                'add_paiement',
+                'add_sessionpaiement',
                 'view_lease'
             ]
         ))

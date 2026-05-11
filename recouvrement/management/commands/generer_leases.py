@@ -4,16 +4,33 @@ from datetime import date, timedelta, datetime
 from dateutil.relativedelta import relativedelta
 import logging
 
-from recouvrement.models import Contrat, Lease
+from recouvrement.models import Contrat, Lease, Parametre
 
 logger = logging.getLogger(__name__)
 
+# --- Place la fonction calculer_prochaine_date_valide ICI ---
+def calculer_prochaine_date_valide(date_actuelle, frequence, jours_repos):
+    if frequence == 'JOURNALIER':
+        nouvelle_date = date_actuelle + timedelta(days=1)
+    elif frequence == 'HEBDOMADAIRE':
+        nouvelle_date = date_actuelle + timedelta(weeks=1)
+    elif frequence == 'MENSUEL':
+        nouvelle_date = date_actuelle + relativedelta(months=1)
+    else:
+        nouvelle_date = date_actuelle + timedelta(days=1)
+
+    if len(jours_repos) >= 7:
+        return nouvelle_date
+
+    while nouvelle_date.weekday() in jours_repos:
+        nouvelle_date += timedelta(days=1)
+
+    return nouvelle_date
 
 class Command(BaseCommand):
-    help = "Génère les échéances (Leases) pour tous les contrats actifs avec logique de rattrapage."
+    help = "Génère les échéances (Leases) pour tous les contrats actifs avec logique de rattrapage et sauts de jours de repos."
 
     def add_arguments(self, parser):
-        # Ajout d'un argument optionnel nommé --date
         parser.add_argument(
             '--date',
             type=str,
@@ -23,22 +40,22 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         # 1. GESTION DE LA DATE CIBLE
         date_param = options.get('date')
-
         if date_param:
             try:
-                # On convertit la chaîne fournie en objet date
                 date_cible = datetime.strptime(date_param, '%Y-%m-%d').date()
             except ValueError:
-                self.stdout.write(
-                    self.style.ERROR("Erreur : Le format de la date doit être YYYY-MM-DD (ex: 2026-04-25)"))
-                return  # On arrête le script si la date est mal formatée
+                self.stdout.write(self.style.ERROR("Erreur : Le format de la date doit être YYYY-MM-DD"))
+                return
         else:
-            # Par défaut, on prend la date du jour
             date_cible = date.today()
 
         self.stdout.write(self.style.WARNING(f"--- Début de la génération des Leases pour le {date_cible} ---"))
 
-        # On récupère les contrats dont l'échéance est arrivée ou dépassée
+        # 🚀 OPTIMISATION : On charge tous les paramètres de toutes les agences en UNE FOIS
+        tous_les_parametres = Parametre.objects.all()
+        config_par_compte = {param.compte_id: param.jours_repos for param in tous_les_parametres}
+
+        # 2. RECHERCHE DES CONTRATS
         contrats_actifs = Contrat.objects.filter(
             statut=Contrat.STATUT_ACTIF,
             prochaine_echeance__lte=date_cible
@@ -53,6 +70,10 @@ class Command(BaseCommand):
         for contrat in contrats_actifs:
             try:
                 with transaction.atomic():
+                    # On récupère la config du compte. Par défaut, si l'entreprise
+                    # n'a pas configuré ses paramètres, la liste est vide [] (on ne saute aucun jour)
+                    jours_repos = config_par_compte.get(contrat.compte_id, [])
+
                     # 🔄 LA BOUCLE DE RATTRAPAGE
                     while contrat.prochaine_echeance and contrat.prochaine_echeance <= date_cible:
 
@@ -71,15 +92,12 @@ class Command(BaseCommand):
                         else:
                             erreurs_ou_doublons += 1
 
-                        # AVANCEMENT DE L'HORLOGE DU CONTRAT
-                        if contrat.frequence == 'JOURNALIER':
-                            contrat.prochaine_echeance += timedelta(days=1)
-                        elif contrat.frequence == 'HEBDOMADAIRE':
-                            contrat.prochaine_echeance += timedelta(weeks=1)
-                        elif contrat.frequence == 'MENSUEL':
-                            contrat.prochaine_echeance += relativedelta(months=1)
-                        else:
-                            contrat.prochaine_echeance += timedelta(days=1)
+                        # 🚀 AVANCEMENT INTELLIGENT DE L'HORLOGE
+                        contrat.prochaine_echeance = calculer_prochaine_date_valide(
+                            date_actuelle=contrat.prochaine_echeance,
+                            frequence=contrat.frequence,
+                            jours_repos=jours_repos
+                        )
 
                     # SAUVEGARDE DE LA NOUVELLE DATE
                     contrat.save(update_fields=['prochaine_echeance'])

@@ -13,18 +13,21 @@ from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import filters, status
 from rest_framework.decorators import action
-from rest_framework.permissions import IsAuthenticated, DjangoModelPermissions, AllowAny
+from rest_framework.exceptions import ValidationError
+from rest_framework.generics import GenericAPIView
+from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from core.filters import LeaseFilter, ContratFilter, PaiementFilter
 from core.pagination import StandardResultsSetPagination
+from core.permissions import StrictDjangoModelPermissions
 from core.views import TenantModelViewSet
 from core.exceptions import CustomAPIException
 from core.errors import ErrorCodes
 from .serializers import ContratSerializer, LeaseSerializer, InitiationPaiementSerializer, PaiementSerializer, \
-    CalendrierSerializer, TypeContratSerializer, SousContratSerializer
-from ...models import Contrat, Paiement, Lease, SessionPaiement, TypeContrat
+    CalendrierSerializer, TypeContratSerializer, SousContratSerializer, ParametreSerializer
+from ...models import Contrat, Paiement, Lease, SessionPaiement, TypeContrat, Parametre
 from ...services import MobilePaymentService
 
 logger = logging.getLogger(__name__)
@@ -33,7 +36,7 @@ logger = logging.getLogger(__name__)
 class ContratViewSet(TenantModelViewSet):
     queryset = Contrat.objects.all()
     serializer_class = ContratSerializer
-    permission_classes = [IsAuthenticated, DjangoModelPermissions]
+    permission_classes = [IsAuthenticated, StrictDjangoModelPermissions]
     pagination_class = StandardResultsSetPagination
     filter_backends = [filters.SearchFilter, filters.OrderingFilter, DjangoFilterBackend]
     filterset_class = ContratFilter
@@ -199,7 +202,7 @@ class LeaseViewSet(TenantModelViewSet):
     queryset = Lease.objects.all()
     serializer_class = LeaseSerializer
     pagination_class = StandardResultsSetPagination
-    permission_classes = [IsAuthenticated, DjangoModelPermissions]
+    permission_classes = [IsAuthenticated, StrictDjangoModelPermissions]
     filterset_class = LeaseFilter
 
     # Configuration des filtres pour le tableau de bord
@@ -288,12 +291,13 @@ class LeaseViewSet(TenantModelViewSet):
         return Response(resultat_final)
 
 
-class InitiationPaiementView(APIView):
+class InitiationPaiementView(GenericAPIView):
     """
     Vue dédiée à l'initiation d'un paiement Mobile Money (Supporte le paiement par Lot/Batch).
     Endpoint: POST /api/v1/initier-paiement/
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated,StrictDjangoModelPermissions]
+    queryset = SessionPaiement.objects.all()
 
     def post(self, request, *args, **kwargs):
         # 1. Validation des données d'entrée (Le Serializer valide le tableau de lignes)
@@ -326,10 +330,10 @@ class InitiationPaiementView(APIView):
                 # B. On crée les Enfants (Les reçus comptables internes)
                 for ligne in lignes:
                     Paiement.objects.create(
-                        session=session,  # 🔗 LE LIEN MAGIQUE EST ICI
+                        session=session,
                         contrat=ligne['lease_id'].contrat,
                         lease=ligne['lease_id'],
-                        utilisateur=request.user,
+                        enregistre_par=request.user,
                         compte_id=request.user.compte_id,
                         montant=ligne['montant'],
                         methode=Paiement.METHODE_MOBILE_MONEY,
@@ -450,7 +454,7 @@ class WebhookView(APIView):
 class PaiementViewSet(TenantModelViewSet):
     queryset = Paiement.objects.all()
     serializer_class = PaiementSerializer
-    permission_classes = [IsAuthenticated, DjangoModelPermissions]
+    permission_classes = [IsAuthenticated, StrictDjangoModelPermissions]
 
     filter_backends = [DjangoFilterBackend, filters.OrderingFilter, filters.SearchFilter]
     filter_class = PaiementFilter
@@ -501,7 +505,7 @@ class TypeContratViewSet(TenantModelViewSet):
     """
     queryset = TypeContrat.objects.all()
     serializer_class = TypeContratSerializer
-    permission_classes = [IsAuthenticated, DjangoModelPermissions]
+    permission_classes = [IsAuthenticated, StrictDjangoModelPermissions]
 
     # Configuration des filtres et recherches
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
@@ -548,3 +552,40 @@ class TypeContratViewSet(TenantModelViewSet):
                 context=f"Impossible de supprimer le type '{instance.libelle}' car il est utilisé par {instance.contrats.count()} contrat(s)."
             )
         super().perform_destroy(instance)
+
+
+class ParametreViewSet(TenantModelViewSet):
+    """
+    Gestion de la configuration de l'entreprise (ex: Jours de repos).
+    Une seule instance autorisée par entreprise (compte_id).
+    """
+    queryset = Parametre.objects.all()
+    serializer_class = ParametreSerializer
+    permission_classes = [IsAuthenticated,StrictDjangoModelPermissions]
+
+    def get_queryset(self):
+        # 💡 Optionnel : Si ton TenantModelViewSet ne le fait pas déjà,
+        # on s'assure que l'utilisateur ne voit que les params de son compte.
+        return super().get_queryset().filter(compte_id=self.request.user.compte_id)
+
+    def perform_create(self, serializer):
+        compte_id = self.request.user.compte_id
+
+        # 🚀 SÉCURITÉ SINGLETON : On empêche de créer une 2ème ligne de paramètre
+        if Parametre.objects.filter(compte_id=compte_id).exists():
+            raise ValidationError({
+                "detail": "Les paramètres existent déjà pour cette entreprise. Veuillez faire une mise à jour (PATCH/PUT) sur l'ID existant."
+            })
+
+        # Enregistrement avec le compte de l'utilisateur
+        serializer.save(compte_id=compte_id)
+
+    def perform_destroy(self, instance):
+        # 💡 Optionnel : Tu peux interdire la suppression si tu veux forcer
+        # l'entreprise à juste vider la liste [] plutôt que de supprimer la ligne.
+        # super().perform_destroy(instance)
+
+        # Si tu préfères interdire la suppression :
+        raise ValidationError({
+            "detail": "La suppression des paramètres globaux est interdite. Vous pouvez simplement vider les jours de repos."
+        })

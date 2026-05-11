@@ -2,6 +2,7 @@ from django.contrib.auth import get_user_model
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.permissions import IsAuthenticated, DjangoModelPermissions
 from accounts.api.v1.serializers import GestionChauffeurSerializer
+from core.permissions import StrictDjangoModelPermissions
 from core.views import TenantModelViewSet
 
 User = get_user_model()
@@ -14,7 +15,7 @@ class GestionChauffeurViewSet(TenantModelViewSet):
     """
     queryset = User.objects.all()
     serializer_class = GestionChauffeurSerializer
-    permission_classes = [IsAuthenticated, DjangoModelPermissions]
+    permission_classes = [IsAuthenticated, StrictDjangoModelPermissions]
     def get_queryset(self):
         # 1. Le TenantModelViewSet isole déjà par 'compte_id'
         qs = super().get_queryset()

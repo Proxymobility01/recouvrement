@@ -1,71 +1,77 @@
-# Register your models here.
 from django.contrib import admin
+from django.contrib.auth.models import Permission
 from .models import Role, CustomUser, CustomUserRole
 
 
-# ==========================================
-# 1. ADMINISTRATION DES ROLES
-# ==========================================
+# --- INLINES ---
+
+class CustomUserRoleInline(admin.TabularInline):
+    """
+    Permet d'ajouter/modifier les rôles directement
+    depuis la fiche de l'utilisateur.
+    """
+    model = CustomUserRole
+    fk_name = 'user'
+    extra = 1
+    fields = ('role', 'principal', 'actif', 'compte_id', 'assigne_par')
+    autocomplete_fields = ['role', 'assigne_par']
+
+
+# --- ADMIN CLASSES ---
+
 @admin.register(Role)
 class RoleAdmin(admin.ModelAdmin):
     list_display = ('libelle', 'slug', 'niveau')
-    prepopulated_fields = {'slug': ('libelle',)}  # Remplit automatiquement le slug
     search_fields = ('libelle', 'slug')
-
-    # INDISPENSABLE pour les ManyToMany (permissions)
-    # Cela crée une interface avec deux colonnes (disponibles / choisies) au lieu d'une simple liste déroulante
+    # filter_horizontal permet d'avoir l'interface de sélection
+    # des permissions beaucoup plus intuitive (deux colonnes)
     filter_horizontal = ('permissions',)
+    ordering = ('niveau',)
 
 
-# ==========================================
-# 2. INLINE : AFFECTATION DES ROLES
-# ==========================================
-class CustomUserRoleInline(admin.TabularInline):
-    """
-    Permet d'ajouter, modifier ou supprimer les rôles directement
-    depuis la page de profil d'un CustomUser.
-    """
-    model = CustomUserRole
-    extra = 1  # Nombre de lignes vides affichées par défaut
-    fk_name = 'user'
-
-    # Utilise une barre de recherche au lieu d'un select si tu as beaucoup d'utilisateurs/rôles
-    autocomplete_fields = ['role', 'assigne_par']
-
-    # On affiche les champs pertinents dans le tableau
-    fields = ('role', 'principal', 'actif', 'compte_id', 'assigne_par')
-
-
-# ==========================================
-# 3. ADMINISTRATION DES UTILISATEURS
-# ==========================================
 @admin.register(CustomUser)
 class CustomUserAdmin(admin.ModelAdmin):
-    # Ce qui s'affiche dans le tableau principal
-    list_display = ('keycloak_id', 'nom_complet', 'email', 'compte_id', 'is_active', 'is_staff', 'is_superuser')
-
-    # Filtres latéraux
+    list_display = ('nom_complet', 'email', 'compte_id', 'is_active', 'is_staff', 'get_role_principal')
     list_filter = ('is_active', 'is_staff', 'is_superuser', 'compte_id')
+    search_fields = ('nom_complet', 'email', 'keycloak_id')
 
-    # Barre de recherche (utilisée aussi pour l'autocomplete_fields de l'inline)
-    search_fields = ('keycloak_id', 'email', 'nom_complet')
+    # On rend le champ de recherche trgm en lecture seule pour éviter les erreurs
+    readonly_fields = ('nom_complet_search', 'created_at', 'updated_at')
 
-    # On intègre le tableau des rôles défini plus haut
     inlines = [CustomUserRoleInline]
 
-    # Organisation de la page de détail en sections claires
     fieldsets = (
-        ('Identité (Géré par Keycloak)', {
-            'fields': ('keycloak_id',)
+        ("Identité Keycloak", {
+            'fields': ('keycloak_id', 'compte_id')
         }),
-        ('Informations Personnelles', {
-            'fields': ('nom_complet', 'email', 'compte_id')
+        ("Informations Personnelles", {
+            'fields': ('nom_complet', 'nom_complet_search', 'email')
         }),
-        ('Accès & Sécurité Django', {
-            'fields': ('is_active', 'is_staff', 'is_superuser'),
-            'description': "Attention : 'Super Admin' donne tous les droits sans vérifier les rôles ci-dessous."
+        ("Permissions & Statuts", {
+            'fields': ('is_active', 'is_staff', 'is_superuser')
+        }),
+        ("Dates", {
+            'fields': ('created_at', 'updated_at'),
+            'classes': ('collapse',)
         }),
     )
 
-    # Si ton BaseModel possède created_at / updated_at, tu peux les afficher en lecture seule
-    # readonly_fields = ('created_at', 'updated_at')
+    def get_role_principal(self, obj):
+        return obj.role_principal
+
+    get_role_principal.short_description = 'Rôle Principal'
+
+
+@admin.register(CustomUserRole)
+class CustomUserRoleAdmin(admin.ModelAdmin):
+    list_display = ('user', 'role', 'compte_id', 'principal', 'actif')
+    list_filter = ('actif', 'principal', 'compte_id')
+    search_fields = ('user__nom_complet', 'role__libelle')
+    autocomplete_fields = ['user', 'role', 'assigne_par']
+
+
+# Optionnel : Permet de gérer les permissions Django directement si besoin
+@admin.register(Permission)
+class PermissionAdmin(admin.ModelAdmin):
+    list_display = ('name', 'content_type', 'codename')
+    search_fields = ('name', 'codename')
