@@ -3,14 +3,11 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, DjangoModelPermissions
 from django_filters.rest_framework import DjangoFilterBackend
 from django.utils import timezone
-
 from core.views import TenantModelViewSet
 from statistiques.api.v1.serializers import StatistiqueJournaliereSerializer
 from statistiques.models import StatistiqueJournaliere
 
 
-# Assure-toi d'importer ton TenantModelViewSet
-# from core.views import TenantModelViewSet
 
 class StatistiqueJournaliereViewSet(TenantModelViewSet):
     """

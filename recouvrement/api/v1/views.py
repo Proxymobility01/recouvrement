@@ -43,9 +43,8 @@ class ContratViewSet(TenantModelViewSet):
     def get_queryset(self):
         qs = super().get_queryset().select_related('chauffeur', 'enregistre_par','type_contrat')
         user = self.request.user
-        if user.is_superuser:
-            return qs
-        if user.has_perm('recouvrement.view_all_contrats'):
+
+        if user.is_superuser or user.has_perm('recouvrement.view_all_contrats'):
             return qs
         return qs.filter(Q(chauffeur=user) | Q(enregistre_par=user))
 
@@ -211,16 +210,11 @@ class LeaseViewSet(TenantModelViewSet):
 
     def get_queryset(self):
         # 1. Isolation par compte_id (Automatique via TenantModelViewSet)
-        qs = super().get_queryset().select_related('contrat')
+        qs = super().get_queryset().select_related('contrat__type_contrat')
         user = self.request.user
-
-        if user.is_superuser:
-            return qs
-
         # 2. Gestion des droits d'accès
         if user.is_superuser or user.has_perm('recouvrement.view_all_leases'):
             return qs
-
         # 3. Un chauffeur ne voit que ses propres échéances
         return qs.filter(contrat__chauffeur=user)
 
@@ -468,9 +462,7 @@ class PaiementViewSet(TenantModelViewSet):
         qs = super().get_queryset().select_related('enregistre_par', 'contrat', 'lease')
         user = self.request.user
 
-        if user.is_superuser:
-            return qs
-        if user.has_perm('recouvrement.view_all_paiements'):
+        if user.is_superuser or  user.has_perm('recouvrement.view_all_paiements'):
             return qs
 
         return qs.filter(Q(contrat__chauffeur=user) | Q(enregistre_par=user))

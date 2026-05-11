@@ -145,21 +145,41 @@ class ContratSerializer(serializers.ModelSerializer):
             'immatriculation': {'required': True,'allow_blank': False,'allow_null': False},
         }
 
-    def validate_type_contrat(self, value):
-        """
-        Si ce Serializer est utilisé pour créer un contrat principal (pas de parent défini),
-        le type de contrat DOIT être principal.
-        """
-        # On vérifie si c'est une création de contrat principal
-        # (self.initial_data ne contient pas de 'parent' ou self.instance n'a pas de parent)
-        parent_id = self.initial_data.get('parent')
-        is_updating_sub_contract = self.instance and self.instance.parent is not None
+    # def validate_type_contrat(self, value):
+    #     """
+    #     Si ce Serializer est utilisé pour créer un contrat principal (pas de parent défini),
+    #     le type de contrat DOIT être principal.
+    #     """
+    #     # On vérifie si c'est une création de contrat principal
+    #     # (self.initial_data ne contient pas de 'parent' ou self.instance n'a pas de parent)
+    #     parent_id = self.initial_data.get('parent')
+    #     is_updating_sub_contract = self.instance and self.instance.parent is not None
+    #
+    #     if not parent_id and not is_updating_sub_contract:
+    #         if not value.est_principal:
+    #             raise serializers.ValidationError(
+    #                 f"Le type '{value.libelle}' est un accessoire. Il ne peut pas être utilisé comme contrat principal."
+    #             )
+    #     return value
 
-        if not parent_id and not is_updating_sub_contract:
-            if not value.est_principal:
-                raise serializers.ValidationError(
-                    f"Le type '{value.libelle}' est un accessoire. Il ne peut pas être utilisé comme contrat principal."
-                )
+    def validate_parent(self, value):
+        """
+        Validation spécifique et sécurisation du champ 'parent'.
+        """
+        # 1. RÈGLE MÉTIER ABSOLUE : Pas de sous-sous-contrat
+        if value is not None and value.parent is not None:
+            raise serializers.ValidationError(
+                "Le contrat parent sélectionné est lui-même un accessoire. "
+            )
+
+        # 2. SÉCURITÉ DE ROUTAGE : Interdire la création directe ici
+        # Si self.instance est None, cela veut dire qu'on fait un POST (Création)
+        if self.instance is None and value is not None:
+            raise serializers.ValidationError(
+                "La création d'un sous-contrat via cette route est interdite pour des raisons de sécurité."
+                f"Veuillez utiliser la route POST /api/v1/contrats/{value.id}/sous-contrats/."
+            )
+
         return value
 
     def validate(self, attrs):
@@ -247,13 +267,12 @@ class ContratSerializer(serializers.ModelSerializer):
         return super().update(instance, validated_data)
 
 
-
-
 class LeaseSerializer(serializers.ModelSerializer):
     # Informations complémentaires du contrat pour l'affichage en liste
     chauffeur_nom_complet = serializers.CharField(source='contrat.nom_complet', read_only=True)
     contrat_id = serializers.IntegerField(source='contrat.id', read_only=True)
     compte_id = serializers.IntegerField(source='contrat.compte_id', read_only=True)
+    type_contrat_libelle = serializers.CharField(source='contrat.type_contrat.libelle', read_only=True)
     reste_a_payer = serializers.SerializerMethodField()
 
     class Meta:
@@ -263,6 +282,7 @@ class LeaseSerializer(serializers.ModelSerializer):
             'compte_id',
             'contrat_id',
             'chauffeur_nom_complet',
+            'type_contrat_libelle',
             'date_echeance',
             'montant_attendu',
             'montant_paye',
