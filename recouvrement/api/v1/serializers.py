@@ -117,7 +117,7 @@ class ContratSerializer(serializers.ModelSerializer):
     enregistre_par_nom_complet = serializers.CharField(source='enregistre_par.nom_complet', read_only=True)
     chauffeur_nom_complet = serializers.CharField(source='chauffeur.nom_complet', read_only=True)
     specificites = serializers.JSONField(required=False, allow_null=True)
-    type_contrat_libelle = serializers.CharField(source='type_contrat.nom', read_only=True)
+    type_contrat_libelle = serializers.CharField(source='type_contrat.libelle', read_only=True)
     montant_verse = serializers.DecimalField(max_digits=12,decimal_places=2,read_only=True)
 
     class Meta:
