@@ -3,7 +3,6 @@ import traceback
 from django.core.mail import send_mail
 from django.conf import settings
 
-# 🚀 On hérite de logging.Handler, PAS de AdminEmailHandler !
 class SimpleAdminEmailHandler(logging.Handler):
     def emit(self, record):
         try:
@@ -15,11 +14,16 @@ class SimpleAdminEmailHandler(logging.Handler):
         except Exception:
             user, method, path, ip = 'Inconnu', '?', '?', '?'
 
-        # 🚀 On extrait la trace
+        # 1. On récupère le titre de l'erreur
+        message_brut = record.getMessage()
+
+        # 2. 🚀 On extrait et on assemble la trace proprement
         if record.exc_info:
-            tb = ''.join(traceback.format_exception(*record.exc_info))
+            # Maintenant que exc_info=True, Python va nous donner la vraie trace !
+            tb_str = ''.join(traceback.format_exception(*record.exc_info))
+            tb = f"{message_brut}\n\nTraceback (most recent call last):\n{tb_str}"
         else:
-            message_brut = record.getMessage()
+            # Sécurité au cas où l'erreur vient d'ailleurs
             if "Traceback (most recent call last):" in message_brut:
                 try:
                     partie_traceback = message_brut.split("Traceback (most recent call last):")[1]
@@ -33,7 +37,7 @@ class SimpleAdminEmailHandler(logging.Handler):
             else:
                 tb = message_brut
 
-        # 🚀 On construit le sujet et le message
+        # 3. L'en-tête propre
         subject = f"[ERREUR 500] {method} {path}"
         message = (
             f"🔴 Erreur serveur\n"
@@ -46,7 +50,7 @@ class SimpleAdminEmailHandler(logging.Handler):
             f"{tb}"
         )
 
-        # 🚀 On utilise send_mail directement (On court-circuite le comportement par défaut de Django)
+        # 4. L'envoi indépendant
         try:
             send_mail(
                 subject=subject,
@@ -56,5 +60,4 @@ class SimpleAdminEmailHandler(logging.Handler):
                 fail_silently=True,
             )
         except Exception as e:
-            # En cas de problème de connexion SMTP, on laisse une trace dans la console
             print(f"Erreur d'envoi d'e-mail admin : {e}")

@@ -78,7 +78,7 @@ def centralized_exception_handler(exc, context):
 
         django_request_logger.error(
             f"Internal Server Error: {request.path if request else 'Inconnu'}",
-            exc_info=exc,
+            exc_info=True,
             extra={'status_code': 500, 'request': request._request if hasattr(request, '_request') else request}
         )
 
