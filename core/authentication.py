@@ -1,7 +1,9 @@
+import logging
+
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from django.contrib.auth import get_user_model
 from core.errors import ErrorCodes
-
+logger = logging.getLogger(__name__)
 User = get_user_model()
 
 
@@ -53,7 +55,10 @@ class KeycloakJWTAuthentication(JWTAuthentication):
             self.sync_roles(user, roles_keycloak, compte_id)
 
         except User.DoesNotExist:
-            # L'utilisateur n'existe pas : on le provisionne (JIT)
+            logger.info(
+                "Provisioning JIT - Keycloak ID: %s / compte_id: %s",
+                keycloak_id, compte_id
+            )
             if not compte_id:
                 raise CustomAPIException(
                     resp_code=ErrorCodes.AUTH_MISSING_TENANT_ID,
@@ -113,19 +118,25 @@ class KeycloakJWTAuthentication(JWTAuthentication):
         """
         from accounts.models import Role, CustomUserRole
 
-        if not keycloak_roles:
+        if not keycloak_roles or not compte_id:
+            logger.warning(
+                "sync_roles ignoré - user: %s / compte_id: %s / roles: %s",
+                user.id, compte_id, keycloak_roles
+            )
             return
 
         # On cherche les rôles locaux
         roles_locaux = Role.objects.filter(slug__in=keycloak_roles)
 
         for role in roles_locaux:
-            CustomUserRole.objects.get_or_create(
+            obj, created = CustomUserRole.objects.get_or_create(
                 user=user,
                 role=role,
                 compte_id=compte_id,
-                defaults={
-                    'actif': True,
-                    'principal': False
-                }
+                defaults={'actif': True, 'principal': False}
             )
+            if created:
+                logger.info(
+                    "Rôle '%s' assigné à user %s (compte %s)",
+                    role.slug, user.id, compte_id
+                )

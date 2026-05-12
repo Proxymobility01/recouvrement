@@ -213,39 +213,63 @@ PAYMENT_API_BASE_URL = env('PAYMENT_API_BASE_URL', default='http://localhost:800
 PAYMENT_SUCCESS_URL = env('PAYMENT_SUCCESS_URL', default='https://www.usebruno.com/downloads')
 PAYMENT_WEBHOOK_SECRET = env('PAYMENT_WEBHOOK_SECRET')
 
+# Email SMTP
+EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+EMAIL_HOST = env('EMAIL_HOST')
+EMAIL_PORT = env.int('EMAIL_PORT', default=587)
+EMAIL_USE_TLS = env.bool('EMAIL_USE_TLS', default=True)
+EMAIL_HOST_USER = env('EMAIL_HOST_USER')
+EMAIL_HOST_PASSWORD = env('EMAIL_HOST_PASSWORD')
+DEFAULT_FROM_EMAIL = env('DEFAULT_FROM_EMAIL')
+
+ADMINS = [
+    (env('ADMIN_NAME'), env('ADMIN_EMAIL')),
+]
 
 
-# LOGGING = {
-#     "version": 1,
-#     "disable_existing_loggers": False,
-#     "formatters": {
-#         "verbose": {
-#             "format": "{levelname} {asctime} {module} {process:d} {thread:d} {message}",
-#             "style": "{",
-#         },
-#     },
-#     "handlers": {
-#         "console": {
-#             "class": "logging.StreamHandler",
-#             "formatter": "verbose",
-#         },
-#         "file_errors": {
-#             "class": "logging.FileHandler",
-#             "filename": BASE_DIR / "logs/errors.log",
-#             "level": "ERROR",
-#             "formatter": "verbose",
-#         },
-#     },
-#     "loggers": {
-#         "django.request": {
-#             "handlers": ["console", "file_errors"],
-#             "level": "ERROR",
-#             "propagate": False,
-#         },
-#         "django.security": {
-#             "handlers": ["console", "file_errors"],
-#             "level": "ERROR",
-#             "propagate": False,
-#         },
-#     },
-# }
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "verbose": {
+            "format": "{levelname} {asctime} {module} {process:d} {thread:d} {message}",
+            "style": "{",
+        },
+    },
+    "filters": {
+        "require_debug_false": {
+            "()": "django.utils.log.RequireDebugFalse",
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "level": "ERROR",
+            "formatter": "verbose",
+        },
+        "file_errors": {
+            "class": "logging.FileHandler",
+            "filename": BASE_DIR / "logs/errors.log",
+            "level": "INFO",
+            "formatter": "verbose",
+        },
+        "mail_admins": {
+            "level": "ERROR",
+            "class": "django.utils.log.AdminEmailHandler",
+            "filters": ["require_debug_false"],
+            "include_html": False,
+        },
+    },
+    "loggers": {
+        "django.request": {
+            "handlers": ["console", "file_errors", "mail_admins"],
+            "level": "INFO",
+            "propagate": False,
+        },
+        "django.security": {
+            "handlers": ["console", "file_errors", "mail_admins"],
+            "level": "INFO",
+            "propagate": False,
+        },
+    },
+}

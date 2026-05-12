@@ -337,13 +337,10 @@ class InitiationPaiementView(GenericAPIView):
                         compte_id=request.user.compte_id,
                         montant=ligne['montant'],
                         methode=Paiement.METHODE_MOBILE_MONEY,
-
-                        # Chaque ligne garde sa propre référence unique !
                         reference=Paiement.generer_reference_paiement(Paiement.METHODE_MOBILE_MONEY)
-
-
                     )
         except Exception as e:
+            logger.error("Erreur préparation panier", exc_info=True)
             return Response(
                 {"error": "Erreur interne lors de la préparation du panier.", "details": str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
