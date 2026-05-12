@@ -159,25 +159,25 @@ class ContratSerializer(serializers.ModelSerializer):
     #             )
     #     return value
 
-    def validate_parent(self, value):
-        """
-        Validation spécifique et sécurisation du champ 'parent'.
-        """
-        # 1. RÈGLE MÉTIER ABSOLUE : Pas de sous-sous-contrat
-        if value is not None and value.parent is not None:
-            raise serializers.ValidationError(
-                "Le contrat parent sélectionné est lui-même un accessoire. "
-            )
-
-        # 2. SÉCURITÉ DE ROUTAGE : Interdire la création directe ici
-        # Si self.instance est None, cela veut dire qu'on fait un POST (Création)
-        if self.instance is None and value is not None:
-            raise serializers.ValidationError(
-                "La création d'un sous-contrat via cette route est interdite pour des raisons de sécurité."
-                f"Veuillez utiliser la route POST /api/v1/contrats/{value.id}/sous-contrats/."
-            )
-
-        return value
+    # def validate_parent(self, value):
+    #     """
+    #     Validation spécifique et sécurisation du champ 'parent'.
+    #     """
+    #     # 1. RÈGLE MÉTIER ABSOLUE : Pas de sous-sous-contrat
+    #     if value is not None and value.parent is not None:
+    #         raise serializers.ValidationError(
+    #             "Le contrat parent sélectionné est lui-même un accessoire. "
+    #         )
+    #
+    #     # 2. SÉCURITÉ DE ROUTAGE : Interdire la création directe ici
+    #     # Si self.instance est None, cela veut dire qu'on fait un POST (Création)
+    #     if self.instance is None and value is not None:
+    #         raise serializers.ValidationError(
+    #             "La création d'un sous-contrat via cette route est interdite pour des raisons de sécurité."
+    #             f"Veuillez utiliser la route POST /api/v1/contrats/{value.id}/sous-contrats/."
+    #         )
+    #
+    #     return value
 
     def validate(self, attrs):
         # 1. Validation Financière

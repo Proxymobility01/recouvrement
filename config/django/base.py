@@ -175,6 +175,9 @@ MEDIA_ROOT = BASE_DIR / "media"
 MEDIA_URL = "/media/"
 APPEND_SLASH = False
 
+LOGS_DIR = BASE_DIR / "logs"
+os.makedirs(LOGS_DIR, exist_ok=True)
+
 #Keycloak settings
 KEYCLOAK_URL = env('KEYCLOAK_URL')
 KEYCLOAK_REALM = env('KEYCLOAK_REALM')
@@ -209,3 +212,40 @@ PAYMENT_API_KEY = env('PAYMENT_API_KEY', default='')
 PAYMENT_API_BASE_URL = env('PAYMENT_API_BASE_URL', default='http://localhost:8000/api/v1')
 PAYMENT_SUCCESS_URL = env('PAYMENT_SUCCESS_URL', default='https://www.usebruno.com/downloads')
 PAYMENT_WEBHOOK_SECRET = env('PAYMENT_WEBHOOK_SECRET')
+
+
+
+# LOGGING = {
+#     "version": 1,
+#     "disable_existing_loggers": False,
+#     "formatters": {
+#         "verbose": {
+#             "format": "{levelname} {asctime} {module} {process:d} {thread:d} {message}",
+#             "style": "{",
+#         },
+#     },
+#     "handlers": {
+#         "console": {
+#             "class": "logging.StreamHandler",
+#             "formatter": "verbose",
+#         },
+#         "file_errors": {
+#             "class": "logging.FileHandler",
+#             "filename": BASE_DIR / "logs/errors.log",
+#             "level": "ERROR",
+#             "formatter": "verbose",
+#         },
+#     },
+#     "loggers": {
+#         "django.request": {
+#             "handlers": ["console", "file_errors"],
+#             "level": "ERROR",
+#             "propagate": False,
+#         },
+#         "django.security": {
+#             "handlers": ["console", "file_errors"],
+#             "level": "ERROR",
+#             "propagate": False,
+#         },
+#     },
+# }
