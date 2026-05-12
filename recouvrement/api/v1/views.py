@@ -346,7 +346,7 @@ class InitiationPaiementView(GenericAPIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
-        # 5. APPEL AU FOURNISSEUR MOBILE MONEY
+        # 5. APPEL AU FOURNISSEUR
         try:
             # 🚀 On envoie la Session (Le Parent) au fournisseur, pas les lignes !
             pay_response = MobilePaymentService.initier_checkout(
