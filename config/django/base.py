@@ -221,6 +221,7 @@ EMAIL_USE_TLS = env.bool('EMAIL_USE_TLS', default=True)
 EMAIL_HOST_USER = env('EMAIL_HOST_USER')
 EMAIL_HOST_PASSWORD = env('EMAIL_HOST_PASSWORD')
 DEFAULT_FROM_EMAIL = env('DEFAULT_FROM_EMAIL')
+SERVER_EMAIL = DEFAULT_FROM_EMAIL
 
 ADMINS = [
     (env('ADMIN_NAME'), env('ADMIN_EMAIL')),
@@ -255,7 +256,7 @@ LOGGING = {
         },
         "mail_admins": {
             "level": "ERROR",
-            "class": "django.utils.log.AdminEmailHandler",
+            "class": "core.logging_handlers.SimpleAdminEmailHandler",
             "filters": ["require_debug_false"],
             "include_html": False,
         },
