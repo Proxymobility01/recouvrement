@@ -258,7 +258,6 @@ LOGGING = {
             "level": "ERROR",
             "class": "core.logging_handlers.SimpleAdminEmailHandler",
             "filters": ["require_debug_false"],
-            "include_html": False,
         },
     },
     "loggers": {
