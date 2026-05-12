@@ -8,7 +8,7 @@ from .errors import ErrorCodes, ERROR_MESSAGES_USR, ERROR_MESSAGES_DEV
 
 logger = logging.getLogger(__name__)
 
-
+django_request_logger = logging.getLogger('django.request')
 class CustomAPIException(APIException):
     """
     Classe centralisée pour lever des erreurs métier.
@@ -73,6 +73,14 @@ def centralized_exception_handler(exc, context):
 
     else:
         # 🚀 C'EST ICI QUE LA MAGIE OPÈRE POUR LES ERREURS 500 INATTENDUES 🚀
+
+        request = context.get('request')
+
+        django_request_logger.error(
+            f"Internal Server Error: {request.path if request else 'Inconnu'}",
+            exc_info=exc,
+            extra={'status_code': 500, 'request': request._request if hasattr(request, '_request') else request}
+        )
 
         # 1. On affiche la trace complète dans le terminal pour le débogage
         logger.error(f"Erreur serveur inattendue : {str(exc)}", exc_info=True)
