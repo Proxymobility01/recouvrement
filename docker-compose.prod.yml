@@ -2,7 +2,7 @@ services:
   db:
     image: timescale/timescaledb-ha:pg15
     restart: always
-    container_name: recouvrement_db
+    container_name: rc_db
     environment:
       - POSTGRES_PASSWORD=${DB_PASSWORD}
       - POSTGRES_USER=${DB_USER}
@@ -19,13 +19,55 @@ services:
       timeout: 5s
       retries: 5
 
+  redis:
+    image: redis:latest
+    restart: always
+    container_name: rc_redis
+    command: >
+      redis-server
+      --appendonly yes
+      --aof-load-corrupt-tail yes
+      --appendfsync everysec
+      --auto-aof-rewrite-percentage 100
+      --auto-aof-rewrite-min-size 64mb
+      --maxmemory 512mb
+      --maxmemory-policy volatile-lru
+      --requirepass ${REDIS_PASSWORD}
+    volumes:
+      - recouvrement_redis_data:/data
+    networks:
+      - recouvrement_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  q2:
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+    image: recouvrement_api:latest
+    restart: always
+    container_name: rc_q2
+    command: python manage.py qcluster
+    networks:
+      - recouvrement_network
+    env_file:
+      - .env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
   backend:
     build:
       context: .
       dockerfile: Dockerfile.prod
     image: recouvrement_api:latest
     restart: always
-    container_name: recouvrement_backend_prod
+    container_name: rc_backend
     command: gunicorn config.wsgi:application -c gunicorn.conf.py
     env_file:
       - .env
@@ -38,10 +80,14 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      redis:
+        condition: service_started
 
 
 volumes:
   recouvrement_db_data:
+    external: true
+  recouvrement_redis_data:
     external: true
 
 
