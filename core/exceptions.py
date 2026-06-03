@@ -4,29 +4,25 @@ from django.http import JsonResponse
 from rest_framework.response import Response
 from rest_framework.views import exception_handler
 from rest_framework.exceptions import APIException, ValidationError
-from .errors import ErrorCodes, ERROR_MESSAGES_USR, ERROR_MESSAGES_DEV
+
+from .errors import ErrorCodes, ERROR_MESSAGES
 
 logger = logging.getLogger(__name__)
-
 django_request_logger = logging.getLogger('django.request')
+
+
 class CustomAPIException(APIException):
     """
     Classe centralisée pour lever des erreurs métier.
-    Génère automatiquement les messages selon le code fourni.
+    Génère automatiquement le payload final {message, dev_message}.
     """
 
-    def __init__(self, resp_code, status_code=400, context=None):
+    def __init__(self, resp_code, status_code=400, dev_message=None):
         self.resp_code = resp_code
         self.status_code = status_code
+        self.dev_message = dev_message or "Aucun détail technique fourni."
 
-        # Récupération automatique depuis les dictionnaires
-        self.usr_msg = ERROR_MESSAGES_USR.get(resp_code, "Une erreur inattendue est survenue.")
-        base_dev_msg = ERROR_MESSAGES_DEV.get(resp_code, "Erreur inconnue dans le dictionnaire DEV.")
-
-        # Ajout du contexte si fourni
-        self.dev_msg = f"{base_dev_msg} [Context: {context}]" if context else base_dev_msg
-
-        super().__init__(detail=self.dev_msg)
+        super().__init__(detail=self.dev_message)
 
 
 def centralized_exception_handler(exc, context):
@@ -36,68 +32,55 @@ def centralized_exception_handler(exc, context):
     response = exception_handler(exc, context)
 
     # Valeurs par défaut (Erreur 500)
-    dev_msg = str(exc)
-    usr_msg = ERROR_MESSAGES_USR[ErrorCodes.SYSTEM_ERROR]
-    resp_code = ErrorCodes.SYSTEM_ERROR
-    link = "http://support.com/"  # Ton lien de documentation API
+    dev_message = str(exc)
+    user_message = ERROR_MESSAGES.get(ErrorCodes.SYSTEM_ERROR, "Erreur interne serveur.")
 
     if response is not None:
         # 1. Nos exceptions métier personnalisées
         if isinstance(exc, CustomAPIException):
-            dev_msg = exc.dev_msg
-            usr_msg = exc.usr_msg
-            resp_code = exc.resp_code
+            dev_message = exc.dev_message
+            user_message = ERROR_MESSAGES.get(exc.resp_code, "Erreur inattendue.")
 
         # 2. Erreurs de validation de DRF (ex: format d'email invalide)
         elif isinstance(exc, ValidationError):
-            dev_msg = response.data  # Garde le format dict de DRF {"champ": ["erreur"]}
-            resp_code = ErrorCodes.INVALID_PAYLOAD
-            usr_msg = ERROR_MESSAGES_USR[ErrorCodes.INVALID_PAYLOAD]
+            dev_message = response.data  # Garde le format dict/list de DRF
+            user_message = ERROR_MESSAGES.get(ErrorCodes.INVALID_PAYLOAD, "Données invalides.")
 
         # 3. Autres erreurs DRF (Auth, Permissions, etc.)
         else:
-            dev_msg = str(response.data.get('detail', response.data))
+            if isinstance(response.data, dict):
+                dev_message = response.data.get('detail', str(response.data))
+            else:
+                dev_message = str(response.data)
 
             if response.status_code == 401:
-                resp_code = ErrorCodes.AUTH_INVALID_TOKEN
-                usr_msg = ERROR_MESSAGES_USR[ErrorCodes.AUTH_INVALID_TOKEN]
+                user_message = ERROR_MESSAGES.get(ErrorCodes.UNAUTHORIZED, "Authentification requise.")
             elif response.status_code == 403:
-                resp_code = ErrorCodes.ACCESS_DENIED
-                usr_msg = ERROR_MESSAGES_USR[ErrorCodes.ACCESS_DENIED]
+                user_message = ERROR_MESSAGES.get(ErrorCodes.FORBIDDEN, "Action non autorisée.")
             elif response.status_code == 404:
-                resp_code = ErrorCodes.ENDPOINT_NOT_FOUND
-                usr_msg = ERROR_MESSAGES_USR[ErrorCodes.ENDPOINT_NOT_FOUND]
+                user_message = ERROR_MESSAGES.get(ErrorCodes.NOT_FOUND, "Ressource introuvable.")
             elif response.status_code == 400:
-                resp_code = ErrorCodes.INVALID_PAYLOAD
-                usr_msg = ERROR_MESSAGES_USR[ErrorCodes.INVALID_PAYLOAD]
+                user_message = ERROR_MESSAGES.get(ErrorCodes.BAD_REQUEST, "Requête invalide.")
 
     else:
-        # 🚀 C'EST ICI QUE LA MAGIE OPÈRE POUR LES ERREURS 500 INATTENDUES 🚀
-
+        # 🚀 GESTION DES ERREURS 500 CRITIQUES INATTENDUES 🚀
         request = context.get('request')
+        path_info = request.path if request else 'Inconnu'
 
-        django_request_logger.error(
-            f"Internal Server Error: {request.path if request else 'Inconnu'}",
-            exc_info=True,
-            extra={'status_code': 500, 'request': request._request if hasattr(request, '_request') else request}
-        )
+        # 🚀 Remplacement par logger.exception pour capturer la trace complète du crash
+        django_request_logger.exception(f"Internal Server Error: {path_info}")
+        logger.exception("Erreur serveur inattendue lors du traitement de la requête")
 
-        # 1. On affiche la trace complète dans le terminal pour le débogage
-        logger.error(f"Erreur serveur inattendue : {str(exc)}", exc_info=True)
-
-        # 2. On crée une réponse DRF de toutes pièces car DRF a abandonné
+        # Création de la réponse d'échec
         response = Response(status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-        # 3. On sécurise le message technique pour ne pas fuiter de données sensibles
-        dev_msg = f"Erreur critique du serveur : {exc.__class__.__name__} - {str(exc)}"
-        # (usr_msg et resp_code sont déjà configurés sur SYSTEM_ERROR par défaut)
+        dev_message = f"Erreur critique du serveur : {exc.__class__.__name__} - {str(exc)}"
+        user_message = ERROR_MESSAGES.get(ErrorCodes.SYSTEM_ERROR, "Erreur interne serveur.")
 
-    # Remplacement du payload par notre standard pour TOUTES les réponses
+    # Format de payload standard et strict
     response.data = {
-        "devMsg": dev_msg,
-        "usrMsg": usr_msg,
-        "respCode": resp_code,
-        "link": link
+        "message": user_message,
+        "dev_message": dev_message
     }
 
     return response
@@ -107,17 +90,14 @@ def custom_404_handler(request, exception=None):
     """
     Capture les URLs introuvables au niveau de Django et renvoie notre format JSON.
     """
-    dev_msg = f"L'URL demandée n'existe pas : {request.path}"
+    dev_message = f"L'URL demandée n'existe pas : {request.path}"
 
-    # 🚀 Petite aide hyper pratique pour ton développeur Front-End
     if not request.path.endswith('/'):
-        dev_msg += " (Indice : Avez-vous oublié le '/' à la fin de l'URL ?)"
+        dev_message += " (Indice : Avez-vous oublié le '/' à la fin de l'URL ?)"
 
     return JsonResponse({
-        "devMsg": dev_msg,
-        "usrMsg": ERROR_MESSAGES_USR[ErrorCodes.ENDPOINT_NOT_FOUND],
-        "respCode": ErrorCodes.ENDPOINT_NOT_FOUND,
-        "link": "http://support.com/"
+        "message": ERROR_MESSAGES.get(ErrorCodes.NOT_FOUND, "Ressource introuvable."),
+        "dev_message": dev_message
     }, status=404)
 
 
@@ -125,9 +105,10 @@ def custom_500_handler(request, exception=None):
     """
     Capture les crashs critiques (hors API) au niveau de Django.
     """
+    # Utilisation de exception ici aussi si un crash survient hors du cycle DRF
+    logger.exception("Erreur critique capturée par le handler 500 Django global")
+
     return JsonResponse({
-        "devMsg": "Erreur critique inattendue du serveur Django.",
-        "usrMsg": ERROR_MESSAGES_USR[ErrorCodes.SYSTEM_ERROR],
-        "respCode": ErrorCodes.SYSTEM_ERROR,
-        "link": "http://support.com/"
+        "message": ERROR_MESSAGES.get(ErrorCodes.SYSTEM_ERROR, "Erreur interne serveur."),
+        "dev_message": "Erreur critique inattendue du serveur Django."
     }, status=500)

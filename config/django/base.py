@@ -42,6 +42,7 @@ INSTALLED_APPS = [
     'rest_framework',
     'rest_framework_simplejwt',
     'django_filters',
+    'django_q',
     'core',
     'accounts',
     'recouvrement',
@@ -118,11 +119,19 @@ DATABASES = {
 }
 
 
+REDIS_HOST = env('REDIS_HOST', default='127.0.0.1')
+REDIS_PORT = env.int('REDIS_PORT', default=6379)
+REDIS_PASSWORD = env('REDIS_PASSWORD', default='')
+
+if REDIS_PASSWORD:
+    REDIS_URL = f"redis://:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}/1"
+else:
+    REDIS_URL = f"redis://{REDIS_HOST}:{REDIS_PORT}/1"
+
 CACHES = {
     'default': {
         'BACKEND': 'django_redis.cache.RedisCache',
-        'LOCATION': env('REDIS_URL', default='redis://127.0.0.1:6379/1'),
-        'TIMEOUT': 3600,
+        'LOCATION': REDIS_URL,
         'OPTIONS': {
             'CLIENT_CLASS': 'django_redis.client.DefaultClient',
             'COMPRESSOR': 'django_redis.compressors.zlib.ZlibCompressor',
@@ -131,8 +140,8 @@ CACHES = {
     }
 }
 
-# SESSION_ENGINE = 'django.contrib.sessions.backends.cache'
-# SESSION_CACHE_ALIAS = 'default'
+SESSION_ENGINE = 'django.contrib.sessions.backends.cache'
+SESSION_CACHE_ALIAS = 'default'
 
 
 # Password validation
@@ -245,13 +254,13 @@ LOGGING = {
     "handlers": {
         "console": {
             "class": "logging.StreamHandler",
-            "level": "ERROR",
+            "level": "INFO",
             "formatter": "verbose",
         },
         "file_errors": {
             "class": "logging.FileHandler",
             "filename": BASE_DIR / "logs/errors.log",
-            "level": "INFO",
+            "level": "ERROR",
             "formatter": "verbose",
         },
         "mail_admins": {
@@ -261,6 +270,12 @@ LOGGING = {
         },
     },
     "loggers": {
+        "": {
+            "handlers": ["console"],
+            "level": "INFO",
+            "propagate": False,
+        },
+        # =========================================================
         "django.request": {
             "handlers": ["console", "file_errors", "mail_admins"],
             "level": "INFO",
@@ -268,8 +283,40 @@ LOGGING = {
         },
         "django.security": {
             "handlers": ["console", "file_errors", "mail_admins"],
-            "level": "INFO",
+            "level": "ERROR",
             "propagate": False,
         },
     },
+}
+
+
+Q_CLUSTER = {
+    'name': 'rc_cluster',
+    'workers': 8,
+    'recycle': 500,
+    'timeout': 90,
+    'retry': 120,
+    'compress': True,
+    'catch_up': False,
+    'save_limit': 250,
+    'queue_limit': 500,
+    'cpu_affinity': 1,
+    'label': 'Django Q2',
+    'redis': {
+        'host': REDIS_HOST,
+        'port': REDIS_PORT,
+        'db': 0,
+        'password': REDIS_PASSWORD if REDIS_PASSWORD else None,
+    },
+    'ALT_CLUSTERS': {
+        'long': {
+            'timeout': 3000,
+            'retry': 3600,
+            'max_attempts': 2,
+        },
+        'short': {
+            'timeout': 10,
+            'max_attempts': 1,
+        },
+    }
 }

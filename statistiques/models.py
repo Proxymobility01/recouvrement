@@ -17,9 +17,8 @@ class StatistiqueJournaliere(BaseModel):
 
 
     class Meta:
-        db_table = "statistique_journaliere"
+        db_table = "rc_stat_journaliere"
         unique_together = ('compte_id', 'date')
-
         indexes = [
             models.Index(fields=['compte_id', '-date']),
         ]

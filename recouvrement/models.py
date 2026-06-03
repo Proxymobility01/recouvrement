@@ -1,7 +1,6 @@
 import secrets
 from django.db.models import Q
 from decimal import Decimal
-
 from django.contrib.postgres.indexes import GinIndex
 from django.core.validators import MinValueValidator
 from django.db import models, transaction
@@ -30,7 +29,7 @@ class TypeContrat(BaseModel):
     )
 
     class Meta:
-        db_table = "recouvrement_type_contrat"
+        db_table = "rc_type_contrat"
         constraints = [
             # 🚀 C'est elle qui garantit l'unicité par entreprise !
             models.UniqueConstraint(fields=['code', 'compte_id'], name='unique_type_contrat_code_par_compte')
@@ -131,6 +130,7 @@ class Contrat(BaseModel):
     montant_total = models.DecimalField(max_digits=12, decimal_places=2)
     montant_restant = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     montant_par_paiement = models.DecimalField(max_digits=12, decimal_places=2)
+    montant_paye = models.DecimalField(max_digits=12,decimal_places=2,default=0,editable=False)
 
     frequence = models.CharField(max_length=50,choices=FREQUENCE_CHOICES, default=JOURNALIER)
     date_debut = models.DateField()
@@ -140,7 +140,7 @@ class Contrat(BaseModel):
     statut = models.CharField(max_length=20, choices=STATUT_CHOICES, default=STATUT_ACTIF)
 
     class Meta:
-        db_table = "recouvrement_contrat"
+        db_table = "rc_contrat"
         constraints = [
             models.UniqueConstraint(
                 fields=['chauffeur'],
@@ -210,9 +210,15 @@ class Contrat(BaseModel):
 
         # S'assure que si on met à jour uniquement 'nom_complet', on met aussi à jour la recherche
         update_fields = kwargs.get('update_fields')
-        if update_fields is not None and 'nom_complet' in update_fields:
+        if update_fields is not None:
             update_fields = set(update_fields)
-            update_fields.add('nom_complet_search')
+            if 'nom_complet' in update_fields:
+                update_fields.add('nom_complet_search')
+
+            # Si on met à jour les finances, on force la sauvegarde du montant payé
+            if 'montant_total' in update_fields or 'montant_restant' in update_fields:
+                update_fields.add('montant_paye')
+
             kwargs['update_fields'] = list(update_fields)
 
         super().save(*args, **kwargs)
@@ -225,25 +231,6 @@ class Contrat(BaseModel):
         """
         return self.sous_contrats.exists()
 
-    @property
-    def montant_verse(self):
-        """
-        Champ virtuel : Calcule dynamiquement l'argent déjà encaissé.
-        """
-        if self.montant_total is not None and self.montant_restant is not None:
-            return self.montant_total - self.montant_restant
-        return 0
-
-    @property
-    def montant_paye(self):
-        """
-        Calcule dynamiquement le montant total déjà payé.
-        Évite de faire une requête SUM() sur les paiements ou les leases,
-        ce qui optimise grandement les performances (O(1)).
-        """
-        if self.montant_total is not None and self.montant_restant is not None:
-            return self.montant_total - self.montant_restant
-        return 0
 
 class SessionPaiement(BaseModel):
     """
@@ -263,7 +250,7 @@ class SessionPaiement(BaseModel):
     ]
 
     reference = models.CharField(max_length=100, unique=True,)
-    transaction_id = models.CharField(max_length=255, null=True, blank=True, help_text="ID transaction fournisseur")
+    gateway_reference = models.CharField(max_length=255, null=True, blank=True)
     date_validation = models.DateTimeField(null=True, blank=True)
     montant_total = models.DecimalField(max_digits=12, decimal_places=2)
     telephone = models.CharField(max_length=20, null=True, blank=True)
@@ -278,7 +265,7 @@ class SessionPaiement(BaseModel):
 
 
     class Meta:
-        db_table = "recouvrement_session_paiement"
+        db_table = "rc_session_paiement"
         indexes = [
             models.Index(fields=['compte_id', '-created_at'], name='idx_spaie_tenant_date'),
         ]
@@ -287,6 +274,7 @@ class SessionPaiement(BaseModel):
 
     def __str__(self):
         return f"Session {self.reference} - {self.montant_total} XAF"
+
 
 class Lease(BaseModel):
     # --- Constantes de Statut ---
@@ -319,7 +307,7 @@ class Lease(BaseModel):
     nom_complet_search = models.CharField(max_length=255, null=True, blank=True, db_index=True)
 
     class Meta:
-        db_table = "recouvrement_lease"
+        db_table = "rc_lease"
         permissions = [
             ("view_all_leases", "Peut voir toutes les échéances de l'entreprise"),
         ]
@@ -443,7 +431,7 @@ class Paiement(BaseModel):
         super().save(*args, **kwargs)
 
     class Meta:
-        db_table = "recouvrement_paiement"
+        db_table = "rc_paiement"
         permissions = [
             ("can_validate_payment", "Peut valider un paiement manuel (Espèces)"),
             ("can_cancel_payment", "Peut annuler une transaction erronée"),
@@ -460,7 +448,7 @@ class Paiement(BaseModel):
     def transaction_id(self):
         """Les espèces n'ont pas d'ID de transaction MTN/Orange."""
         if self.session:
-            return self.session.transaction_id
+            return self.session.reference
         return None
 
 
@@ -479,7 +467,7 @@ class Parametre(BaseModel):
     )
 
     class Meta:
-        db_table = "recouvrement_parametre"
+        db_table = "rc_parametre"
         constraints = [
             # Une seule ligne de paramètres par entreprise !
             models.UniqueConstraint(fields=['compte_id'], name='unique_param_par_compte')
@@ -487,8 +475,3 @@ class Parametre(BaseModel):
 
     def __str__(self):
         return f"Paramètres du compte {self.compte_id}"
-
-
-
-
-

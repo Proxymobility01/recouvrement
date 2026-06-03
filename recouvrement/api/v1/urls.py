@@ -16,5 +16,5 @@ router.register(r'type-contrats', TypeContratViewSet, basename='type-contrats')
 urlpatterns = [
     path('', include(router.urls)),
     path('initier-paiement/', InitiationPaiementView.as_view(), name='initier-paiement'),
-    path('webhook/paiement/', WebhookView.as_view(), name='webhook-paiement'),
+    path('webhook/', WebhookView.as_view(), name='webhook-paiement'),
 ]

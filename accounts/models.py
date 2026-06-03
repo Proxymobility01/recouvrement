@@ -205,3 +205,51 @@ class CustomUserRole(BaseModel):
         return f"{self.user} -> {self.role}"
 
 
+class ConfigPaiement(BaseModel):
+    """
+    Stocke les identifiants, URLs et clés de sécurité de la passerelle
+    Mobile Money spécifiques à chaque entreprise (Tenant).
+    """
+    api_key = models.CharField(
+        "Clé d'API Passerelle",
+        max_length=255,
+        help_text="Clé API fournie par PayGate (ex: Api-Key...)"
+    )
+    base_url = models.URLField(
+        "URL de base de l'API",
+        help_text="Ex de format: https://api.paygate.cm"
+    )
+    success_url = models.URLField(
+        "URL de redirection en cas de succès",
+        help_text="URL vers laquelle le chauffeur est redirigé après son paiement réussi."
+    )
+
+    webhook_secret = models.CharField(
+        "Secret de validation du Webhook",
+        max_length=255,
+        help_text="Clé secrète partagée pour vérifier la signature HMAC (X-Signature) des notifications reçues."
+    )
+
+    class Meta:
+        db_table = "account_config_paiement"
+        constraints = [
+            # Sécurité majeure : Une seule configuration de paiement active par entreprise
+            models.UniqueConstraint(
+                fields=['compte_id'],
+                name='unique_config_paiement_par_compte'
+            )
+        ]
+
+    def __str__(self):
+        return f"Configuration Paiement - Compte {self.compte_id}"
+
+    def save(self, *args, **kwargs):
+        super().save(*args, **kwargs)
+        # Vider le cache à chaque mise à jour de la configuration
+        from django.core.cache import cache
+        cache.delete(f"credentials_{self.compte_id}")
+
+    def delete(self, *args, **kwargs):
+        from django.core.cache import cache
+        cache.delete(f"credentials_{self.compte_id}")
+        super().delete(*args, **kwargs)
