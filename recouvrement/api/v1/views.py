@@ -12,7 +12,6 @@ from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import filters, status
 from rest_framework.decorators import action
-from rest_framework.exceptions import ValidationError
 from rest_framework.generics import GenericAPIView
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
@@ -29,7 +28,7 @@ from .serializers import ContratSerializer, LeaseSerializer, InitiationPaiementS
     CalendrierSerializer, TypeContratSerializer, SousContratSerializer, ParametreSerializer
 from ...models import Contrat, Paiement, Lease, SessionPaiement, TypeContrat, Parametre
 from ...services import PaymentService
-from ...tasks import _schedule_next_verification
+from core.tasks import _schedule_next_verification
 
 logger = logging.getLogger(__name__)
 

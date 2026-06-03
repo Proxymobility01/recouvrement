@@ -18,9 +18,11 @@ class StatistiqueJournaliere(BaseModel):
 
     class Meta:
         db_table = "rc_stat_journaliere"
-        unique_together = ('compte_id', 'date')
+        constraints = [
+            models.UniqueConstraint(fields=['compte_id', 'date'], name='unique_stat_par_compte_et_date')
+        ]
         indexes = [
-            models.Index(fields=['compte_id', '-date']),
+            models.Index(fields=['compte_id', '-date'], name='idx_stat_tenant_date'),
         ]
 
     def __str__(self):

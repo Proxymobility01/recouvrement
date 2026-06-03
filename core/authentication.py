@@ -3,6 +3,7 @@ import logging
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from django.contrib.auth import get_user_model
 from core.errors import ErrorCodes
+
 logger = logging.getLogger(__name__)
 User = get_user_model()
 
@@ -15,7 +16,6 @@ class KeycloakJWTAuthentication(JWTAuthentication):
     """
 
     def get_user(self, validated_token):
-        # ⚠️ Vérifie bien le chemin d'import selon ton architecture
         from core.exceptions import CustomAPIException
 
         keycloak_id = validated_token.get('sub')
@@ -30,9 +30,9 @@ class KeycloakJWTAuthentication(JWTAuthentication):
 
         if not roles_keycloak:
             raise CustomAPIException(
-                resp_code=ErrorCodes.AUTH_NO_APP_ROLES,
+                resp_code=ErrorCodes.FORBIDDEN,
                 status_code=403,
-                context=f"Keycloak ID: {keycloak_id}"
+                dev_message=f"Aucun rôle 'recouvrement_app' détecté pour Keycloak ID: {keycloak_id}"
             )
 
         # ==========================================
@@ -40,9 +40,9 @@ class KeycloakJWTAuthentication(JWTAuthentication):
         # ==========================================
         if not keycloak_id:
             raise CustomAPIException(
-                resp_code=ErrorCodes.AUTH_INVALID_TOKEN,
+                resp_code=ErrorCodes.UNAUTHORIZED,
                 status_code=401,
-                context="Claim 'sub' introuvable dans le token"
+                dev_message="Claim 'sub' (Keycloak ID) introuvable dans le token JWT."
             )
 
         # ==========================================
@@ -50,20 +50,17 @@ class KeycloakJWTAuthentication(JWTAuthentication):
         # ==========================================
         try:
             user = User.objects.get(keycloak_id=keycloak_id)
-
-            # (Optionnel) On synchronise les rôles à chaque connexion
+            # On synchronise les rôles à chaque connexion
             self.sync_roles(user, roles_keycloak, compte_id)
 
         except User.DoesNotExist:
-            logger.info(
-                "Provisioning JIT - Keycloak ID: %s / compte_id: %s",
-                keycloak_id, compte_id
-            )
+            logger.info("Provisioning JIT - Keycloak ID: %s / compte_id: %s", keycloak_id, compte_id)
+
             if not compte_id:
                 raise CustomAPIException(
-                    resp_code=ErrorCodes.AUTH_MISSING_TENANT_ID,
+                    resp_code=ErrorCodes.FORBIDDEN,
                     status_code=403,
-                    context=f"Provisioning échoué pour Keycloak ID: {keycloak_id}"
+                    dev_message=f"Provisioning échoué pour Keycloak ID {keycloak_id} : 'compte_id' manquant dans le JWT."
                 )
 
             # Extraction des données
@@ -95,9 +92,9 @@ class KeycloakJWTAuthentication(JWTAuthentication):
 
         if compte_id and local_compte_id and str(local_compte_id) != str(compte_id):
             raise CustomAPIException(
-                resp_code=ErrorCodes.AUTH_TENANT_MISMATCH,
+                resp_code=ErrorCodes.FORBIDDEN,
                 status_code=403,
-                context=f"Token={compte_id} vs Local={local_compte_id}"
+                dev_message=f"Conflit de sécurité Tenant: Token={compte_id} vs Local={local_compte_id}"
             )
 
         # ==========================================
@@ -105,9 +102,9 @@ class KeycloakJWTAuthentication(JWTAuthentication):
         # ==========================================
         if getattr(user, 'is_active', True) is False:
             raise CustomAPIException(
-                resp_code=ErrorCodes.USER_INACTIVE,
+                resp_code=ErrorCodes.FORBIDDEN,
                 status_code=403,
-                context=f"Local ID: {user.id}"
+                dev_message=f"Compte inactif en BDD locale pour User ID: {user.id}"
             )
 
         return user

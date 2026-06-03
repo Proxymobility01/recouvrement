@@ -12,7 +12,7 @@ class Command(BaseCommand):
         parser.add_argument('--keycloak_id', type=str, required=True)
         parser.add_argument('--compte_id', type=int, required=True)
         parser.add_argument('--email', type=str, required=True)
-        parser.add_argument('--tel', type=str, required=True)
+        parser.add_argument('--tel', type=str, required=True) # 💡 À décommenter si le modèle CustomUser a un champ 'tel'
         parser.add_argument('--nom', type=str, required=True)
         parser.add_argument('--prenom', type=str, required=True)
         parser.add_argument('--password', type=str, required=True)
@@ -21,7 +21,7 @@ class Command(BaseCommand):
         keycloak_id = options['keycloak_id']
         compte_id = options['compte_id']
         email = options['email']
-        tel = options['tel']  # Récupéré mais non utilisé dans ce modèle, prêt pour l'avenir
+        tel = options['tel']
         nom = options['nom']
         prenom = options['prenom']
         password = options['password']
@@ -31,7 +31,7 @@ class Command(BaseCommand):
         try:
             with transaction.atomic():
                 # ==========================================
-                # 1. CRÉATION DU SUPER-ADMINISTRATEUR
+                # 1. CRÉATION OU MISE À JOUR DU SUPER-ADMIN
                 # ==========================================
                 user, created_user = CustomUser.objects.get_or_create(
                     keycloak_id=keycloak_id,
@@ -43,6 +43,7 @@ class Command(BaseCommand):
                         'is_active': True,
                         'compte_id': compte_id,
                         'password': make_password(password)
+                        # 'tel': tel  # 💡 À ajouter si le champ existe
                     }
                 )
 
@@ -59,27 +60,39 @@ class Command(BaseCommand):
                     self.stdout.write(self.style.SUCCESS(f"👤 SuperAdmin '{keycloak_id}' créé avec succès."))
 
                 # ==========================================
-                # 2. ASSIGNATION DU RÔLE SUPER_ADMIN
+                # 2. GESTION ET ASSIGNATION DU RÔLE
                 # ==========================================
-                try:
-                    role_super_admin = Role.objects.get(slug="SUPER_ADMIN")
+                # 🚀 Sécurité : On crée le rôle de base s'il n'existe pas encore
+                role_super_admin, created_role_base = Role.objects.get_or_create(
+                    slug="SUPER_ADMIN",
+                    defaults={
+                        'libelle': "Super Administrateur",
+                        'niveau': 100
+                    }
+                )
 
-                    assignation, created_role = CustomUserRole.objects.get_or_create(
-                        user=user,
-                        role=role_super_admin,
-                        defaults={
-                            'actif': True,
-                            'principal': True,
-                            'compte_id': compte_id
-                        }
-                    )
+                if created_role_base:
+                    self.stdout.write(
+                        self.style.WARNING("🛡️ Rôle 'SUPER_ADMIN' généré automatiquement dans la table des rôles."))
 
-                    if created_role:
-                        self.stdout.write(self.style.SUCCESS(f"🛡️ Rôle SUPER_ADMIN assigné à {keycloak_id}."))
+                # 🚀 On place compte_id dans la recherche pour le cloisonnement Tenant
+                assignation, created_assignation = CustomUserRole.objects.get_or_create(
+                    user=user,
+                    role=role_super_admin,
+                    compte_id=compte_id,
+                    defaults={
+                        'actif': True,
+                        'principal': True
+                    }
+                )
 
-                except Role.DoesNotExist:
-                    self.stdout.write(self.style.ERROR("❌ Le rôle SUPER_ADMIN n'existe pas."))
-                    raise Exception("Rôle SUPER_ADMIN introuvable.")
+                if created_assignation:
+                    self.stdout.write(
+                        self.style.SUCCESS(f"🛡️ Rôle SUPER_ADMIN assigné à {keycloak_id} pour le compte {compte_id}."))
+                else:
+                    assignation.actif = True
+                    assignation.principal = True
+                    assignation.save()
 
             self.stdout.write(self.style.SUCCESS("\n🚀 INITIALISATION DU SYSTÈME TERMINÉE AVEC SUCCÈS !"))
 

@@ -1,14 +1,17 @@
 import logging
 from datetime import timedelta
 from decimal import Decimal
+
+from django.core.management import call_command
 from django.db import transaction, DatabaseError
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from django_q.tasks import async_task, schedule
 from django_q.models import Schedule
 
-from .models import SessionPaiement, Paiement, Lease, Contrat
-from .services import PaymentService
+from recouvrement.models import SessionPaiement, Paiement, Lease, Contrat
+from recouvrement.services import PaymentService
+from statistiques.services import statistiques_du_jour
 
 logger = logging.getLogger(__name__)
 
@@ -184,3 +187,40 @@ def _schedule_next_verification(session: SessionPaiement, delay_seconds: int):
         schedule_type=Schedule.ONCE,
         next_run=timezone.now() + timedelta(seconds=delay_seconds)
     )
+
+
+def rafraichir_statistiques_horaire_task():
+    """
+    Tâche récurrente Django Q2 lancée toutes les heures.
+    Recalcule les statistiques de l'entreprise pour la journée en cours.
+    """
+    aujourdhui = timezone.now().date()
+    logger.info(f"[RafraichirStatistiquesHoraireTask] Début du rafraîchissement pour le {aujourdhui}.")
+
+    try:
+        # 🚀 CORRECTION : Appel direct de la fonction, pas de call_command
+        statistiques_du_jour(date_cible=aujourdhui)
+        logger.info(f"[RafraichirStatistiquesHoraireTask] ✅ Agrégation horaire terminée.")
+
+    except Exception:  # 🚀 CORRECTION : Pas de parenthèses à Exception
+        logger.exception(f"[RafraichirStatistiquesHoraireTask] ❌ Échec critique lors du calcul.")
+        raise
+
+
+def generer_leases_quotidien_task():
+    """
+    Tâche récurrente lancée tous les jours à 2h00 du matin.
+    Appelle la commande d'administration pour générer les nouvelles échéances.
+    """
+    logger.info("[GenererLeasesQuotidienTask] ⏳ Démarrage de la génération des échéances.")
+
+    try:
+        # 🚀 Utilisation de call_command en passant le nom du fichier (sans .py)
+        # Remplace 'generer_leases' par le vrai nom de ton fichier dans management/commands/
+        call_command('generer_leases')
+
+        logger.info("[GenererLeasesQuotidienTask] ✅ Génération des échéances terminée avec succès.")
+
+    except Exception:
+        logger.exception("[GenererLeasesQuotidienTask] ❌ Échec critique lors de la génération des échéances.")
+        raise

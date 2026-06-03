@@ -1,13 +1,17 @@
+import logging
+
 from django.contrib.auth import get_user_model
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.permissions import IsAuthenticated, DjangoModelPermissions
 from accounts.api.v1.serializers import GestionChauffeurSerializer
+from core.errors import ErrorCodes
+from core.exceptions import CustomAPIException
 from core.permissions import StrictDjangoModelPermissions
 from core.views import TenantModelViewSet
 
 User = get_user_model()
 
-
+logger = logging.getLogger(__name__)
 class GestionChauffeurViewSet(TenantModelViewSet):
     """
     API complète (CRUD) pour gérer les chauffeurs d'un compte partenaire.
@@ -33,19 +37,19 @@ class GestionChauffeurViewSet(TenantModelViewSet):
     def perform_destroy(self, instance):
         """
         🚀 SOFT DELETE : Règle d'or en comptabilité.
-        On ne supprime jamais un chauffeur qui a pu faire des paiements.
-        On lui coupe juste l'accès.
+        On ne supprime jamais un chauffeur. On le désactive.
         """
         user_connecte = self.request.user
 
         if instance.id == user_connecte.id:
-            raise PermissionDenied("Vous ne pouvez pas désactiver votre propre compte.")
+            raise CustomAPIException(
+                resp_code=ErrorCodes.FORBIDDEN,
+                status_code=403,
+                dev_message="Soft-delete bloqué : Un utilisateur ne peut pas désactiver son propre compte."
+            )
 
-        # On appelle le logger de ton TenantModelViewSet (si tu veux garder la trace)
-        import logging
-        logger = logging.getLogger(__name__)
         logger.warning(
-            f"[AUDIT] DÉSACTIVATION Chauffeur id={instance.pk} compte_id={instance.compte_id} "
+            f"[AUDIT] DÉSACTIVATION Chauffeur id={instance.pk} compte_id={getattr(instance, 'compte_id', '?')} "
             f"par admin={user_connecte.email}"
         )
 

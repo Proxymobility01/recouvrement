@@ -1,77 +1,94 @@
 from django.contrib import admin
-from django.contrib.auth.models import Permission
-from .models import Role, CustomUser, CustomUserRole
+from .models import Role, CustomUser, CustomUserRole, ConfigPaiement
 
-
-# --- INLINES ---
-
-class CustomUserRoleInline(admin.TabularInline):
-    """
-    Permet d'ajouter/modifier les rôles directement
-    depuis la fiche de l'utilisateur.
-    """
-    model = CustomUserRole
-    fk_name = 'user'
-    extra = 1
-    fields = ('role', 'principal', 'actif', 'compte_id', 'assigne_par')
-    autocomplete_fields = ['role', 'assigne_par']
-
-
-# --- ADMIN CLASSES ---
 
 @admin.register(Role)
 class RoleAdmin(admin.ModelAdmin):
     list_display = ('libelle', 'slug', 'niveau')
     search_fields = ('libelle', 'slug')
-    # filter_horizontal permet d'avoir l'interface de sélection
-    # des permissions beaucoup plus intuitive (deux colonnes)
+    list_filter = ('niveau',)
+    prepopulated_fields = {'slug': ('libelle',)}
     filter_horizontal = ('permissions',)
-    ordering = ('niveau',)
+    ordering = ('-niveau', 'libelle')
+
+
+class CustomUserRoleInline(admin.TabularInline):
+    """
+    Permet d'affecter des rôles directement depuis la fiche d'un utilisateur.
+    """
+    model = CustomUserRole
+    fk_name = 'user'
+    extra = 0
+    fields = ('role', 'compte_id', 'principal', 'actif', 'assigne_par')
+    raw_id_fields = ('assigne_par',)  # Affiche un champ de recherche au lieu d'une liste déroulante géante
 
 
 @admin.register(CustomUser)
 class CustomUserAdmin(admin.ModelAdmin):
-    list_display = ('nom_complet', 'email', 'compte_id', 'is_active', 'is_staff', 'get_role_principal')
+    list_display = ('nom_complet', 'keycloak_id', 'email', 'compte_id', 'is_active', 'is_staff',
+                    'role_principal_display')
+    search_fields = ('nom_complet', 'keycloak_id', 'email', 'compte_id')
     list_filter = ('is_active', 'is_staff', 'is_superuser', 'compte_id')
-    search_fields = ('nom_complet', 'email', 'keycloak_id')
-
-    # On rend le champ de recherche trgm en lecture seule pour éviter les erreurs
-    readonly_fields = ('nom_complet_search', 'created_at', 'updated_at')
-
+    readonly_fields = ('created_at', 'updated_at', 'nom_complet_search')
     inlines = [CustomUserRoleInline]
+    ordering = ('-created_at',)
 
     fieldsets = (
-        ("Identité Keycloak", {
-            'fields': ('keycloak_id', 'compte_id')
+        ('Identité (Keycloak)', {
+            'fields': ('keycloak_id', 'compte_id', 'nom_complet', 'nom_complet_search', 'email')
         }),
-        ("Informations Personnelles", {
-            'fields': ('nom_complet', 'nom_complet_search', 'email')
-        }),
-        ("Permissions & Statuts", {
+        ('Permissions & Statut', {
             'fields': ('is_active', 'is_staff', 'is_superuser')
         }),
-        ("Dates", {
+        ('Audit', {
             'fields': ('created_at', 'updated_at'),
             'classes': ('collapse',)
         }),
     )
 
-    def get_role_principal(self, obj):
-        return obj.role_principal
+    def role_principal_display(self, obj):
+        """
+        Affiche le rôle principal directement dans la liste des utilisateurs.
+        """
+        role = obj.role_principal
+        return role.libelle if role else "—"
 
-    get_role_principal.short_description = 'Rôle Principal'
+    role_principal_display.short_description = "Rôle Principal"
 
 
 @admin.register(CustomUserRole)
 class CustomUserRoleAdmin(admin.ModelAdmin):
-    list_display = ('user', 'role', 'compte_id', 'principal', 'actif')
-    list_filter = ('actif', 'principal', 'compte_id')
-    search_fields = ('user__nom_complet', 'role__libelle')
-    autocomplete_fields = ['user', 'role', 'assigne_par']
+    """
+    Vue globale de toutes les affectations de rôles.
+    Très utile pour chercher "Qui est admin dans le compte 5 ?".
+    """
+    list_display = ('user', 'role', 'compte_id', 'principal', 'actif', 'created_at')
+    search_fields = ('user__nom_complet', 'user__keycloak_id', 'role__libelle')
+    list_filter = ('actif', 'principal', 'role', 'compte_id')
+    raw_id_fields = ('user', 'assigne_par')
+    readonly_fields = ('created_at', 'updated_at')
+    ordering = ('-created_at',)
 
 
-# Optionnel : Permet de gérer les permissions Django directement si besoin
-@admin.register(Permission)
-class PermissionAdmin(admin.ModelAdmin):
-    list_display = ('name', 'content_type', 'codename')
-    search_fields = ('name', 'codename')
+@admin.register(ConfigPaiement)
+class ConfigPaiementAdmin(admin.ModelAdmin):
+    list_display = ('compte_id', 'base_url', 'created_at', 'updated_at')
+    search_fields = ('compte_id', 'base_url')
+    list_filter = ('created_at',)
+    readonly_fields = ('created_at', 'updated_at')
+
+    fieldsets = (
+        ('Informations Générales', {
+            'fields': ('compte_id',)
+        }),
+        ('Configuration API (PayGate)', {
+            'fields': ('api_key', 'base_url', 'success_url')
+        }),
+        ('Sécurité Webhook', {
+            'fields': ('webhook_secret',)
+        }),
+        ('Audit', {
+            'fields': ('created_at', 'updated_at'),
+            'classes': ('collapse',)
+        }),
+    )
