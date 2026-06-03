@@ -216,11 +216,7 @@ SIMPLE_JWT = {
     'TOKEN_TYPE_CLAIM': None,
 }
 
-# PAIEMENT MOBILE
-PAYMENT_API_KEY = env('PAYMENT_API_KEY', default='')
-PAYMENT_API_BASE_URL = env('PAYMENT_API_BASE_URL', default='http://localhost:8000/api/v1')
-PAYMENT_SUCCESS_URL = env('PAYMENT_SUCCESS_URL', default='https://www.usebruno.com/downloads')
-PAYMENT_WEBHOOK_SECRET = env('PAYMENT_WEBHOOK_SECRET')
+
 
 # Email SMTP
 EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
