@@ -33,7 +33,7 @@ class Command(BaseCommand):
         partner_perms = list(Permission.objects.filter(
             content_type__app_label__in=['recouvrement', 'accounts','statistiques']
         ).exclude(
-            codename__in=['change_paiement', 'delete_paiement','delete_lease','delete_customuser','delete_statistique','change_statistique','add_statistique']
+            codename__in=['change_paiement', 'delete_paiement','delete_lease','delete_statistique','change_statistique','add_statistique']
         ))
 
         # Permissions DRIVER :
