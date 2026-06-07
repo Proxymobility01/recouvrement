@@ -4,6 +4,8 @@ import hmac
 import json
 import logging
 from collections import defaultdict
+from decimal import Decimal
+
 from django_q.tasks import async_task
 from django.utils.dateparse import parse_datetime
 from django.db import transaction, DatabaseError
@@ -136,6 +138,7 @@ class ContratViewSet(TenantModelViewSet):
     @action(detail=True, methods=['post'], url_path='sous-contrats')
     def sous_contrats(self, request, pk=None):
         parent_contrat = self.get_object()
+
         if parent_contrat.parent is not None:
             raise CustomAPIException(
                 resp_code=ErrorCodes.BAD_REQUEST,
@@ -143,21 +146,35 @@ class ContratViewSet(TenantModelViewSet):
                 dev_message="Le contrat cible (parent_contrat) possède déjà un parent_id. Pas de sous-sous-contrats."
             )
 
-        # 3. Validation des données envoyées par le Front-End
+        # 1. Validation des données envoyées par le Front-End
         serializer = SousContratSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
         sc_instance_data = serializer.validated_data
 
-        # 4. Héritage automatique des données du parent (ADN du contrat)
+        # 2. 🧮 LOGIQUE FINANCIÈRE : Extraction et calcul des montants
+        sc_total = sc_instance_data.get('montant_total', Decimal('0.00'))
+        sc_avance = sc_instance_data.get('montant_paye', Decimal('0.00'))
+        montant_restant_calcule = max(Decimal('0.00'), sc_total - sc_avance)
+
+        # 3. Héritage automatique de l'ADN du parent et injection des finances
         sc_instance_data['parent'] = parent_contrat
         sc_instance_data['chauffeur'] = parent_contrat.chauffeur
         sc_instance_data['compte_id'] = parent_contrat.compte_id
         sc_instance_data['nom_complet'] = parent_contrat.nom_complet
         sc_instance_data['enregistre_par'] = request.user
-        sc_instance_data['statut'] = Contrat.STATUT_ACTIF
-        sc_instance_data['montant_restant'] = sc_instance_data.get('montant_total')
 
+        # Injection des valeurs calculées
+        sc_instance_data['montant_paye'] = sc_avance
+        sc_instance_data['montant_restant'] = montant_restant_calcule
+
+        # 4. Le statut s'adapte automatiquement (si l'avance couvre déjà tout)
+        if montant_restant_calcule == 0:
+            sc_instance_data['statut'] = Contrat.STATUT_SOLDE
+        else:
+            sc_instance_data['statut'] = Contrat.STATUT_ACTIF
+
+        # 5. Création en base de données
         try:
             sous_contrat = Contrat.objects.create(**sc_instance_data)
         except DatabaseError as e:
@@ -168,7 +185,7 @@ class ContratViewSet(TenantModelViewSet):
                 dev_message=f"Échec de création du sous-contrat : {str(e)}"
             )
 
-        # 6. Réponse pour le Front-End
+        # 6. Réponse Front-End
         return Response({
             "message": "Sous-contrat ajouté avec succès.",
             "id": sous_contrat.id,
