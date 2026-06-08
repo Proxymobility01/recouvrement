@@ -50,6 +50,8 @@ services:
     restart: unless-stopped
     container_name: rc_staging_q2
     command: python manage.py qcluster
+    env_file:
+      - .env
     networks:
       - recouvrement_staging_network
     depends_on:
@@ -71,7 +73,7 @@ services:
     ports:
       - "127.0.0.1:9101:8000"
     volumes:
-      - /home/ubuntu/recouvrement_staging/staticfiles/:/home/django/config/staticfiles
+      - /home/ubuntu/recouvrement_staging/config/staticfiles/:/home/django/config/staticfiles
     networks:
       - recouvrement_staging_network
     depends_on:
