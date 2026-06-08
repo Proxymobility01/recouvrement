@@ -58,8 +58,6 @@ services:
     command: python manage.py qcluster
     networks:
       - recouvrement_staging_network
-    env_file:
-      - .env.staging
     depends_on:
       db:
         condition: service_healthy
