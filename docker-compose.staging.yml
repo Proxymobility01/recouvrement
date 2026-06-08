@@ -3,8 +3,6 @@ services:
     image: timescale/timescaledb-ha:pg15
     restart: unless-stopped
     container_name: rc_staging_db
-    env_file:
-      - .env.staging
     environment:
       - POSTGRES_PASSWORD=${DB_PASSWORD}
       - POSTGRES_USER=${DB_USER}
@@ -25,8 +23,6 @@ services:
     image: redis:8
     restart: unless-stopped
     container_name: rc_staging_redis
-    env_file:
-      - .env.staging
     command: >
       redis-server
       --appendonly yes
@@ -53,8 +49,6 @@ services:
     image: recouvrement_api:staging
     restart: unless-stopped
     container_name: rc_staging_q2
-    env_file:
-      - .env.staging
     command: python manage.py qcluster
     networks:
       - recouvrement_staging_network
@@ -73,7 +67,7 @@ services:
     container_name: rc_staging_backend
     command: gunicorn config.wsgi:application -c gunicorn.conf.py
     env_file:
-      - .env.staging
+      - .env
     ports:
       - "127.0.0.1:9101:8000"
     volumes:
