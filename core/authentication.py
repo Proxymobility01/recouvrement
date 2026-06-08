@@ -122,6 +122,12 @@ class KeycloakJWTAuthentication(JWTAuthentication):
             )
             return
 
+        try:
+            compte_id_int = int(compte_id)
+        except (TypeError, ValueError):
+            logger.exception(f"Le compte_id JWT n'est pas un nombre valide : {compte_id}")
+            return
+
         # On cherche les rôles locaux
         roles_locaux = Role.objects.filter(slug__in=keycloak_roles)
 
@@ -129,7 +135,7 @@ class KeycloakJWTAuthentication(JWTAuthentication):
             obj, created = CustomUserRole.objects.get_or_create(
                 user=user,
                 role=role,
-                compte_id=compte_id,
+                compte_id=compte_id_int,
                 defaults={'actif': True, 'principal': False}
             )
             if created:
