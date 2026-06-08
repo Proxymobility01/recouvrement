@@ -8,7 +8,7 @@ services:
       - POSTGRES_USER=${DB_USER}
       - POSTGRES_DB=${DB_NAME}
     ports:
-      - "127.0.0.1:5455:5432"
+      - "127.0.0.1:5457:5432"
     volumes:
       - recouvrement_staging_db_data:/home/postgres/pgdata/data
     networks:
