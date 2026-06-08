@@ -23,6 +23,7 @@ static/
 # --- Sécurité & Environnement (CRITIQUE) ---
 .env
 .env.local
+.env.staging
 .env.*
 secrets.json
 *.key
