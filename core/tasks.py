@@ -137,7 +137,7 @@ def verifier_statut_session_task(session_id: int):
 
             # 🚀 DÉLÉGATION À LA VENTILATION COMPTABLE
             async_task(
-                'recouvrement.tasks.paiement_task',
+                'core.tasks.paiement_task',
                 session.id,
                 statut_gateway
             )
@@ -181,7 +181,7 @@ def _schedule_next_verification(session: SessionPaiement, delay_seconds: int):
     Schedule.objects.filter(name=schedule_name).delete()
 
     schedule(
-        'recouvrement.tasks.verifier_statut_session_task',
+        'core.tasks.verifier_statut_session_task',
         session.id,
         name=schedule_name,
         schedule_type=Schedule.ONCE,

@@ -502,7 +502,7 @@ class WebhookView(APIView):
 
             # B. Lancement de la tâche asynchrone (Le worker fera le gros du travail)
             async_task(
-                'recouvrement.tasks.paiement_task',
+                'core.tasks.paiement_task',
                 session.id,
                 statut_gateway
             )

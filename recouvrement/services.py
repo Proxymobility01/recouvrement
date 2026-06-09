@@ -37,27 +37,21 @@ class PaymentService:
         # --- Si non trouvé dans le cache, on attaque la base de données ---
         config = ConfigPaiement.objects.filter(compte_id=compte_id).first()
 
-        if config:
-            config_data = {
-                "api_key": config.api_key,
-                "base_url": config.base_url.rstrip('/'),
-                "success_url": config.success_url
-            }
-        else:
-            # Fallback sur les variables globales du .env
-            if not settings.PAYMENT_API_KEY or not settings.PAYMENT_API_BASE_URL:
-                # 🚀 Utilisation de ErrorCodes et dev_message
-                raise CustomAPIException(
-                    resp_code=ErrorCodes.SYSTEM_ERROR,
-                    status_code=500,
-                    dev_message=f"Aucune configuration de paiement pour le compte_id {compte_id}."
-                )
+        # 🚀 SÉCURITÉ MULTI-TENANT STRICTE : Pas de fallback. On bloque si ce n'est pas configuré.
+        if not config:
+            logger.error(f"[PayGate] Tentative de paiement échouée : compte_id {compte_id} sans configuration.")
+            raise CustomAPIException(
+                resp_code=ErrorCodes.SYSTEM_ERROR,
+                status_code=400,  # 400 Bad Request est plus adapté ici car c'est un pré-requis manquant
+                dev_message=f"Le partenaire (compte_id: {compte_id}) n'a pas configuré ses identifiants de paiement."
+            )
 
-            config_data = {
-                "api_key": settings.PAYMENT_API_KEY,
-                "base_url": settings.PAYMENT_API_BASE_URL.rstrip('/'),
-                "success_url": settings.PAYMENT_SUCCESS_URL
-            }
+        # On extrait uniquement ce qui doit aller dans le cache Redis
+        config_data = {
+            "api_key": config.api_key,
+            "base_url": config.base_url.rstrip('/'),
+            "success_url": config.success_url
+        }
 
         # 🚀 Sauvegarde du dictionnaire dans le cache pour 24 heures (86400 secondes)
         cache.set(cache_key, config_data, 86400)

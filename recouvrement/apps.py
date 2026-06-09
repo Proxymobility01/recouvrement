@@ -16,7 +16,7 @@ def setup_scheduled_tasks(sender, **kwargs):
         Schedule.objects.update_or_create(
             name='Génération Quotidienne des Échéances (Leases)',
             defaults={
-                'func': 'recouvrement.tasks.generer_leases_quotidien_task',
+                'func': 'core.tasks.generer_leases_quotidien_task',
                 'schedule_type': Schedule.CRON,
                 'cron': '0 2 * * *',
                 'repeats': -1,
