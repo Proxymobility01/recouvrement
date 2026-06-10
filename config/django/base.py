@@ -10,7 +10,8 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/6.0/ref/settings/
 """
 from pathlib import Path
-
+import sentry_sdk
+from sentry_sdk.integrations.django import DjangoIntegration
 from config.env import BASE_DIR, env
 import os
 #permet de charger le .env
@@ -115,6 +116,8 @@ DATABASES = {
         'PASSWORD': env('DB_PASSWORD'),
         'HOST': env('DB_HOST'),
         'PORT': env('DB_PORT'),
+        'CONN_MAX_AGE': 0,
+
     }
 }
 
@@ -228,10 +231,6 @@ EMAIL_HOST_PASSWORD = env('EMAIL_HOST_PASSWORD')
 DEFAULT_FROM_EMAIL = env('DEFAULT_FROM_EMAIL')
 SERVER_EMAIL = DEFAULT_FROM_EMAIL
 
-ADMINS = [
-    (env('ADMIN_NAME'), env('ADMIN_EMAIL')),
-]
-
 
 LOGGING = {
     "version": 1,
@@ -240,11 +239,6 @@ LOGGING = {
         "verbose": {
             "format": "{levelname} {asctime} {module} {process:d} {thread:d} {message}",
             "style": "{",
-        },
-    },
-    "filters": {
-        "require_debug_false": {
-            "()": "django.utils.log.RequireDebugFalse",
         },
     },
     "handlers": {
@@ -259,11 +253,6 @@ LOGGING = {
             "level": "ERROR",
             "formatter": "verbose",
         },
-        "mail_admins": {
-            "level": "ERROR",
-            "class": "core.logging_handlers.SimpleAdminEmailHandler",
-            "filters": ["require_debug_false"],
-        },
     },
     "loggers": {
         "": {
@@ -273,12 +262,12 @@ LOGGING = {
         },
         # =========================================================
         "django.request": {
-            "handlers": ["console", "file_errors", "mail_admins"],
+            "handlers": ["console", "file_errors"],
             "level": "INFO",
             "propagate": False,
         },
         "django.security": {
-            "handlers": ["console", "file_errors", "mail_admins"],
+            "handlers": ["console", "file_errors"],
             "level": "ERROR",
             "propagate": False,
         },
@@ -316,3 +305,24 @@ Q_CLUSTER = {
         },
     }
 }
+
+sentry_sdk.init(
+    dsn=env('SENTRY_DSN'),
+    environment=env('SENTRY_ENVIRONMENT', default='development'),
+
+    integrations=[DjangoIntegration()],
+    # Add data like request headers and IP for users;
+    # see https://docs.sentry.io/platforms/python/data-management/data-collected/ for more info
+    send_default_pii=True,
+    # Set traces_sample_rate to 1.0 to capture 100%
+    # of transactions for tracing.
+    traces_sample_rate=1.0,
+    # To collect profiles for all profile sessions,
+    # set `profile_session_sample_rate` to 1.0.
+    profile_session_sample_rate=1.0,
+    # Profiles will be automatically collected while
+    # there is an active span.
+    profile_lifecycle="trace",
+    # Enable logs to be sent to Sentry
+    enable_logs=True,
+)

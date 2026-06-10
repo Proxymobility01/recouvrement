@@ -37,6 +37,45 @@ services:
       timeout: 5s
       retries: 5
 
+  pgbouncer:
+    image: edoburu/pgbouncer:v1.25.1-p0
+    restart: always
+    container_name: rc_pgbouncer
+    environment:
+      - DB_HOST=db
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_NAME=${DB_NAME}
+
+
+      - AUTH_TYPE=scram-sha-256
+      - POOL_MODE=transaction
+
+      - MAX_CLIENT_CONN=500
+      - DEFAULT_POOL_SIZE=45
+      - MIN_POOL_SIZE=10
+      - RESERVE_POOL_SIZE=15
+      - RESERVE_POOL_TIMEOUT=3
+
+      - MAX_DB_CONNECTIONS=60
+      - MAX_USER_CONNECTIONS=60
+
+      - SERVER_CONNECT_TIMEOUT=15
+      - SERVER_LOGIN_RETRY=1
+      - SERVER_IDLE_TIMEOUT=600
+      - QUERY_WAIT_TIMEOUT=30
+      - CLIENT_LOGIN_TIMEOUT=90
+
+      - ADMIN_USERS=${DB_USER}
+      - IGNORE_STARTUP_PARAMETERS=extra_float_digits
+    ports:
+      - "6432:5432"
+    networks:
+      - recouvrement_network
+    depends_on:
+      db:
+        condition: service_healthy
+
   backend:
     build:
       context: .
@@ -54,12 +93,12 @@ services:
     env_file:
       - .env
     environment:
-      - RUN_MIGRATIONS=True
+      - RUN_MIGRATIONS=False
       - COLLECT_STATIC=False
-      - INIT_SYSTEM=True
+      - INIT_SYSTEM=False
     depends_on:
-      db:
-        condition: service_healthy
+      pgbouncer:
+        condition: service_started
       redis:
         condition: service_healthy
 

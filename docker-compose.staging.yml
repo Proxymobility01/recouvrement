@@ -19,6 +19,40 @@ services:
       timeout: 5s
       retries: 5
 
+
+  pgbouncer:
+    image: edoburu/pgbouncer:v1.25.1-p0
+    restart: unless-stopped
+    container_name: rc_staging_pgbouncer
+    environment:
+      - DB_HOST=db
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_NAME=${DB_NAME}
+      - AUTH_TYPE=md5
+      - POOL_MODE=transaction
+      - MAX_CLIENT_CONN=500
+      - DEFAULT_POOL_SIZE=45
+      - MIN_POOL_SIZE=10
+      - RESERVE_POOL_SIZE=15
+      - RESERVE_POOL_TIMEOUT=3
+      - MAX_DB_CONNECTIONS=60
+      - MAX_USER_CONNECTIONS=60
+      - SERVER_CONNECT_TIMEOUT=15
+      - SERVER_LOGIN_RETRY=1
+      - SERVER_IDLE_TIMEOUT=600
+      - QUERY_WAIT_TIMEOUT=30
+      - CLIENT_LOGIN_TIMEOUT=90
+      - ADMIN_USERS=${DB_USER}
+      - IGNORE_STARTUP_PARAMETERS=extra_float_digits,options
+    ports:
+      - "127.0.0.1:6433:5432"
+    networks:
+      - recouvrement_staging_network
+    depends_on:
+      db:
+        condition: service_healthy
+
   redis:
     image: redis:8
     restart: unless-stopped
@@ -52,6 +86,9 @@ services:
     command: python manage.py qcluster
     env_file:
       - .env
+    environment:
+      - DB_HOST=db
+      - DB_PORT=${DB_PORT}
     networks:
       - recouvrement_staging_network
     depends_on:
@@ -77,8 +114,8 @@ services:
     networks:
       - recouvrement_staging_network
     depends_on:
-      db:
-        condition: service_healthy
+      pgbouncer:
+        condition: service_started
       redis:
         condition: service_started
 

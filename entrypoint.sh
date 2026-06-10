@@ -5,8 +5,8 @@
 # ─────────────────────────────────────────
 if [ "$DB_HOST" = "pgbouncer" ] || [ "$DB_HOST" = "db" ]; then
     echo "⏳ En attente de PostgreSQL ($DB_HOST:$DB_PORT)..."
-    while ! nc -z "$DB_HOST" "$DB_PORT"; do
-        sleep 0.1
+    while ! python -c "import socket; s = socket.socket(socket.AF_INET, socket.SOCK_STREAM); s.settimeout(1); s.connect(('$DB_HOST', int('$DB_PORT')))" 2>/dev/null; do
+        sleep 1
     done
     echo "✓ PostgreSQL disponible"
 fi
