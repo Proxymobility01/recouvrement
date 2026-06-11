@@ -104,7 +104,7 @@ services:
     image: recouvrement_api:staging
     restart: unless-stopped
     container_name: rc_staging_backend
-    command: gunicorn config.wsgi:application -c gunicorn.conf.py
+    command: gunicorn config.asgi:application -c gunicorn.conf.py
     env_file:
       - .env
     ports:

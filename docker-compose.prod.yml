@@ -109,7 +109,7 @@ services:
     image: recouvrement_api:latest
     restart: always
     container_name: rc_backend
-    command: gunicorn config.wsgi:application -c gunicorn.conf.py
+    command: gunicorn config.asgi:application -c gunicorn.conf.py
     env_file:
       - .env
     ports:
