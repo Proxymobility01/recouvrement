@@ -1,11 +1,11 @@
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated, DjangoModelPermissions
+from rest_framework.permissions import IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
 from django.utils import timezone
 
 from core.permissions import StrictDjangoModelPermissions
-from core.views import TenantModelViewSet
+from core.api.v1.views import TenantModelViewSet
 from statistiques.api.v1.serializers import StatistiqueJournaliereSerializer
 from statistiques.models import StatistiqueJournaliere
 

@@ -23,6 +23,7 @@ urlpatterns = [
     path('api/v1/', include('recouvrement.api.v1.urls')),
     path('api/v1/accounts/', include('accounts.api.v1.urls')),
     path('api/v1/', include('statistiques.api.v1.urls')),
+    path('api/v1/', include('core.api.v1.urls')),
 ]
 
 handler404 = 'core.exceptions.custom_404_handler'

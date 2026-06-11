@@ -8,7 +8,7 @@ from decimal import Decimal
 
 from django_q.tasks import async_task
 from django.utils.dateparse import parse_datetime
-from django.db import transaction, DatabaseError
+from django.db import transaction, DatabaseError, IntegrityError
 from django.db.models import Q
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
@@ -23,7 +23,7 @@ from core.filters import LeaseFilter, ContratFilter, PaiementFilter
 from core.pagination import StandardResultsSetPagination
 from core.permissions import StrictDjangoModelPermissions
 from core.utils import format_phone_cm
-from core.views import TenantModelViewSet
+from core.api.v1.views import TenantModelViewSet
 from core.exceptions import CustomAPIException
 from core.errors import ErrorCodes
 from .serializers import ContratSerializer, LeaseSerializer, InitiationPaiementSerializer, PaiementSerializer, \
@@ -66,8 +66,26 @@ class ContratViewSet(TenantModelViewSet):
 
         try:
             self.perform_create(serializer)
+
+        # 🛡️ 1. LE FILET DE SÉCURITÉ POUR LE 400 BAD REQUEST
+        except IntegrityError as e:
+            if 'uniq_contrat_parent_actif_par_chauffeur' in str(e):
+                raise CustomAPIException(
+                    resp_code=ErrorCodes.BAD_REQUEST,
+                    status_code=400,
+                    dev_message="Ce chauffeur possède déjà un contrat parent actif (Interception DB en accès concurrent)."
+                )
+            # Si c'est une autre erreur d'intégrité (ex: un champ null interdit en DB), on log et on renvoie une 500
+            logger.exception("Erreur d'intégrité inattendue lors de la création d'un contrat")
+            raise CustomAPIException(
+                resp_code=ErrorCodes.SYSTEM_ERROR,
+                status_code=500,
+                dev_message=f"Erreur de contrainte DB : {str(e)}"
+            )
+
+        # 🚨 2. LE RESTE DES ERREURS GRAVES (500)
         except DatabaseError as e:
-            logger.exception("Erreur DB lors de la création d'un contrat")
+            logger.exception("Erreur DB globale lors de la création d'un contrat")
             raise CustomAPIException(
                 resp_code=ErrorCodes.SYSTEM_ERROR,
                 status_code=500,
@@ -532,7 +550,7 @@ class PaiementViewSet(TenantModelViewSet):
     queryset = Paiement.objects.all()
     serializer_class = PaiementSerializer
     permission_classes = [IsAuthenticated, StrictDjangoModelPermissions]
-
+    pagination_class = StandardResultsSetPagination
     filter_backends = [DjangoFilterBackend, filters.OrderingFilter, filters.SearchFilter]
     filter_class = PaiementFilter
     search_fields = ['reference', 'nom_complet_search', '^session__telephone',]

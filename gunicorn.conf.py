@@ -11,11 +11,10 @@ bind = "0.0.0.0:8000"
 # PERFORMANCES (Workers & Threads)
 # ==========================================
 # Formule standard de Gunicorn pour exploiter à fond le CPU
-workers = multiprocessing.cpu_count() * 2 + 1
+workers = multiprocessing.cpu_count()
 
-# 'gthread' est parfait pour une API, car il gère mieux les requêtes I/O (comme l'attente de la base de données)
-worker_class = "gthread"
-threads = 2
+worker_class = "uvicorn.workers.UvicornWorker"
+
 worker_connections = 1000
 
 # ==========================================
@@ -30,9 +29,9 @@ max_requests_jitter = 100
 # TIMEOUTS & STABILITÉ
 # ==========================================
 # 120 secondes max par requête (utile si ton API fait des appels externes un peu lents)
-timeout = 120
+timeout = 0
 graceful_timeout = 30
-keepalive = 5
+keepalive = 75
 
 # ==========================================
 # LOGS & DÉBOGAGE
@@ -50,7 +49,7 @@ capture_output = True
 proc_name = "recouvrement_backend"
 
 # Charge l'application en mémoire avant de forker les workers (réduit la RAM globale)
-preload_app = True
+preload_app = False
 
 # Limites pour éviter les attaques DDoS par requêtes malformées
 limit_request_line = 4094

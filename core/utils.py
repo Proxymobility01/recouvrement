@@ -1,4 +1,7 @@
 import unicodedata
+import json
+import redis
+from django.conf import settings
 
 
 def remove_accents(texte):
@@ -27,3 +30,32 @@ def format_phone_cm(phone):
         return f"237{clean_phone}"
 
     return clean_phone
+
+
+
+
+def notifier_utilisateur(compte_id: int, user_id: int, event_type: str, data: dict):
+    """
+    Envoie un événement SSE à un canal utilisateur strictement privé.
+    Sécurise l'isolation Multi-Tenant (compte_id) et individuelle (user_id).
+    """
+    # Connexion synchrone standard pour l'expéditeur (Publisher)
+    r = redis.Redis(
+        host=settings.REDIS_HOST,
+        port=settings.REDIS_PORT,
+        password=settings.REDIS_PASSWORD or None,
+        decode_responses=True
+    )
+
+    # Construction du canal hermétique
+    canal_prive = f"notifications:{compte_id}:{user_id}"
+
+    # Encapsulation propre du payload
+    payload = json.dumps({
+        "type": event_type,
+        "data": data
+    })
+
+    # Publication immédiate (Fire and Forget)
+    r.publish(canal_prive, payload)
+    r.close()

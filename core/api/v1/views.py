@@ -3,6 +3,7 @@ from rest_framework import viewsets
 from core.exceptions import CustomAPIException
 from core.errors import ErrorCodes
 
+
 logger = logging.getLogger(__name__)
 
 
@@ -76,3 +77,6 @@ class TenantModelViewSet(viewsets.ModelViewSet):
         # Note : Pas besoin de try/except DatabaseError ici, DRF s'en charge très bien
         # et notre custom_exception_handler renverra un beau 500 si la requête SQL échoue.
         instance.delete()
+
+
+

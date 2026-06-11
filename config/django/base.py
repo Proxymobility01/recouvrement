@@ -103,6 +103,7 @@ TEMPLATES = [
 ]
 
 WSGI_APPLICATION = 'config.wsgi.application'
+ASGI_APPLICATION = 'config.asgi.application'
 
 
 # Database
@@ -309,6 +310,7 @@ Q_CLUSTER = {
 sentry_sdk.init(
     dsn=env('SENTRY_DSN'),
     environment=env('SENTRY_ENVIRONMENT', default='development'),
+
 
     integrations=[DjangoIntegration()],
     # Add data like request headers and IP for users;

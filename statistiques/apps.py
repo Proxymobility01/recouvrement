@@ -21,6 +21,7 @@ def setup_scheduled_tasks(sender, **kwargs):
                 'func': 'core.tasks.rafraichir_statistiques_horaire_task',
                 'schedule_type': Schedule.HOURLY,
                 'repeats': -1,
+                'catch_up': False,
             }
         )
         logger.info("✅ Tâche planifiée 'Rafraîchissement des Statistiques' configurée avec succès (Exécution horaire).")

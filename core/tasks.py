@@ -9,6 +9,7 @@ from django.utils.dateparse import parse_datetime
 from django_q.tasks import async_task, schedule
 from django_q.models import Schedule
 
+from core.utils import notifier_utilisateur
 from recouvrement.models import SessionPaiement, Paiement, Lease, Contrat
 from recouvrement.services import PaymentService
 from statistiques.services import statistiques_du_jour
@@ -19,60 +20,80 @@ logger = logging.getLogger(__name__)
 def paiement_task(session_id, statut_gateway):
     """
     Tâche asynchrone Django Q2 pour ventiler les lignes de paiement.
-    - SUCCESS : Met à jour Paiement, Lease et Contrat.
-    - FAILED / CANCELED : Met à jour uniquement Paiement.
     """
     logger.info(f"[PaiementTask] Lancement de la tâche pour la session ID: {session_id} avec statut: {statut_gateway}")
 
     try:
-        session = SessionPaiement.objects.get(id=session_id)
+        # 🚀 CORRECTION 1 : On précharge l'utilisateur pour éviter une requête SQL inutile plus tard
+        session = SessionPaiement.objects.select_related('utilisateur').get(id=session_id)
 
         with transaction.atomic():
-            # 1. On verrouille uniquement les paiements enfants qui sont encore EN_ATTENTE
             lignes_paiement = Paiement.objects.select_for_update().filter(
                 session=session,
                 statut=Paiement.STATUT_EN_ATTENTE
             )
 
-            if not lignes_paiement.exists():
-                logger.info(f"[PaiementTask] Aucune ligne en attente pour la session {session.reference}. Arrêt.")
-                return
+            # 🚀 CORRECTION 2 : On ne fait plus de "return", on exécute la ventilation
+            # UNIQUEMENT s'il y a des lignes. Mais on laissera le code continuer ensuite vers le SSE.
+            if lignes_paiement.exists():
 
-            # ==========================================
-            # SCÉNARIO A : PAIEMENT RÉUSSI
-            # ==========================================
-            if statut_gateway == 'SUCCESS':
-                for paiement in lignes_paiement:
-                    # A. Mise à jour de la ligne de Paiement
-                    paiement.statut = Paiement.STATUT_VALIDE
-                    paiement.date_paiement = session.date_validation or timezone.now()
-                    paiement.save()
+                # ==========================================
+                # SCÉNARIO A : PAIEMENT RÉUSSI
+                # ==========================================
+                if statut_gateway == 'SUCCESS':
+                    for paiement in lignes_paiement:
+                        paiement.statut = Paiement.STATUT_VALIDE
+                        paiement.date_paiement = session.date_validation or timezone.now()
+                        paiement.save()
 
-                    # B. Mise à jour du Lease (L'échéance)
-                    lease = paiement.lease
-                    if lease:
-                        lease.montant_paye += paiement.montant
-                        lease.statut = Lease.STATUT_PAYE if lease.montant_paye >= lease.montant_attendu else Lease.STATUT_PARTIEL
-                        lease.save()
+                        lease = paiement.lease
+                        if lease:
+                            lease.montant_paye += paiement.montant
+                            lease.statut = Lease.STATUT_PAYE if lease.montant_paye >= lease.montant_attendu else Lease.STATUT_PARTIEL
+                            lease.save()
 
-                        # C. Mise à jour du Contrat (La dette globale)
-                        contrat = lease.contrat
-                        contrat.montant_restant = max(contrat.montant_restant - paiement.montant, Decimal('0.00'))
-                        contrat.montant_paye += paiement.montant
+                            contrat = lease.contrat
+                            contrat.montant_restant = max(contrat.montant_restant - paiement.montant, Decimal('0.00'))
+                            contrat.montant_paye += paiement.montant
 
-                        if contrat.montant_restant == 0:
-                            contrat.statut = Contrat.STATUT_SOLDE
-                        contrat.save()
+                            if contrat.montant_restant == 0:
+                                contrat.statut = Contrat.STATUT_SOLDE
+                            contrat.save()
 
-                logger.info(f"[PaiementTask] ✅ Ventilation SUCCESS terminée pour {session.reference}.")
+                    logger.info(f"[PaiementTask] ✅ Ventilation SUCCESS terminée pour {session.reference}.")
 
-            # ==========================================
-            # SCÉNARIO B : ÉCHEC OU ANNULATION
-            # ==========================================
-            elif statut_gateway in ['FAILED', 'CANCELED']:
-                nouveau_statut = Paiement.STATUT_ECHEC if statut_gateway == 'FAILED' else Paiement.STATUT_ANNULE
-                lignes_paiement.update(statut=nouveau_statut)
-                logger.info(f"[PaiementTask] ❌ Lignes passées en {nouveau_statut} pour {session.reference}.")
+                # ==========================================
+                # SCÉNARIO B : ÉCHEC OU ANNULATION
+                # ==========================================
+                elif statut_gateway in ['FAILED', 'CANCELED']:
+                    nouveau_statut = Paiement.STATUT_ECHEC if statut_gateway == 'FAILED' else Paiement.STATUT_ANNULE
+                    lignes_paiement.update(statut=nouveau_statut)
+                    logger.info(f"[PaiementTask] ❌ Lignes passées en {nouveau_statut} pour {session.reference}.")
+            else:
+                logger.info(f"[PaiementTask] Session {session.reference} déjà ventilée. On passe direct au SSE.")
+
+        # =========================================================
+        # 🚀 ENVOI DU SSE (Garantit d'être exécuté quoi qu'il arrive)
+        # =========================================================
+        payload_paygate = session.webhook_payload or {}
+        failure_reason = payload_paygate.get("failure_reason", "Une erreur est survenue lors du traitement.")
+
+        sse_data = {
+            "session_id": session.id,
+            "reference": session.reference,
+            "statut": statut_gateway,
+            "montant": str(session.montant_total),
+            "message": "Votre paiement a été validé avec succès !" if statut_gateway == "SUCCESS" else f"Échec du paiement : {failure_reason}"
+        }
+
+        if hasattr(session, 'utilisateur') and session.utilisateur:
+            notifier_utilisateur(
+                compte_id=session.compte_id,
+                user_id=session.utilisateur.id,
+                event_type="transaction.completed",
+                data=sse_data
+            )
+            logger.info(f"[PaiementTask] 📣 Notification SSE envoyée à l'utilisateur {session.utilisateur.id}")
 
     except SessionPaiement.DoesNotExist:
         logger.error(f"[PaiementTask] Erreur : Session ID {session_id} introuvable en BDD.")

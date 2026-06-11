@@ -6,7 +6,7 @@ from accounts.api.v1.serializers import GestionChauffeurSerializer
 from core.errors import ErrorCodes
 from core.exceptions import CustomAPIException
 from core.permissions import StrictDjangoModelPermissions
-from core.views import TenantModelViewSet
+from core.api.v1.views import TenantModelViewSet
 
 User = get_user_model()
 logger = logging.getLogger(__name__)

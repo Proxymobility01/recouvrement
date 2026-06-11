@@ -64,4 +64,4 @@ EXPOSE 8000
 
 # Lancement (Utilise la config Gunicorn optimisée)
 ENTRYPOINT ["/home/django/entrypoint.sh"]
-CMD ["gunicorn", "config.wsgi:application", "-c", "gunicorn.conf.py"]
+CMD ["gunicorn", "config.asgi:application", "-c", "gunicorn.conf.py"]

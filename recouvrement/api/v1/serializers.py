@@ -159,6 +159,30 @@ class ContratSerializer(serializers.ModelSerializer):
         montant_par_paiement = attrs.get('montant_par_paiement', getattr(self.instance, 'montant_par_paiement', None))
         montant_paye = attrs.get('montant_paye', getattr(self.instance, 'montant_paye', 0))
 
+        parent = attrs.get('parent', getattr(self.instance, 'parent', None))
+        chauffeur = attrs.get('chauffeur', getattr(self.instance, 'chauffeur', None))
+
+
+        if not parent:
+            # On cherche s'il existe déjà un contrat parent actif pour ce chauffeur
+            existing_active = Contrat.objects.filter(
+                chauffeur=chauffeur,
+                parent__isnull=True
+            ).exclude(
+                statut__in=['SOLDE', 'ANNULE']
+            )
+
+            # Si on modifie un contrat existant, on s'exclut soi-même de la recherche
+            if self.instance:
+                existing_active = existing_active.exclude(pk=self.instance.pk)
+
+            # 3. L'interception !
+            if existing_active.exists():
+                # Cela va lever automatiquement une erreur HTTP 400 Bad Request
+                raise serializers.ValidationError({
+                    "chauffeur": "Ce chauffeur possède déjà un contrat parent actif. Vous ne pouvez pas en créer un autre."
+                })
+
         if montant_par_paiement and montant_total and montant_par_paiement > montant_total:
             raise serializers.ValidationError({
                 "montant_par_paiement": "L'échéance dépasse le total."
