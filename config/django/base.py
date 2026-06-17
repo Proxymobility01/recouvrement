@@ -188,9 +188,6 @@ MEDIA_ROOT = BASE_DIR / "media"
 MEDIA_URL = "/media/"
 APPEND_SLASH = False
 
-LOGS_DIR = BASE_DIR / "logs"
-os.makedirs(LOGS_DIR, exist_ok=True)
-
 #Keycloak settings
 KEYCLOAK_URL = env('KEYCLOAK_URL')
 KEYCLOAK_REALM = env('KEYCLOAK_REALM')
@@ -248,12 +245,6 @@ LOGGING = {
             "level": "INFO",
             "formatter": "verbose",
         },
-        "file_errors": {
-            "class": "logging.FileHandler",
-            "filename": BASE_DIR / "logs/errors.log",
-            "level": "ERROR",
-            "formatter": "verbose",
-        },
     },
     "loggers": {
         "": {
@@ -263,12 +254,12 @@ LOGGING = {
         },
         # =========================================================
         "django.request": {
-            "handlers": ["console", "file_errors"],
+            "handlers": ["console",],
             "level": "INFO",
             "propagate": False,
         },
         "django.security": {
-            "handlers": ["console", "file_errors"],
+            "handlers": ["console",],
             "level": "ERROR",
             "propagate": False,
         },

@@ -83,7 +83,8 @@ services:
     image: recouvrement_api:latest
     restart: always
     container_name: rc_backend
-    command: uvicorn config.asgi:application --host 0.0.0.0 --port 8000 --reload --reload-dir /home/django
+    command: uvicorn config.asgi:application --host 0.0.0.0 --port 8000 --workers 2
+#    command: python manage.py runserver 0.0.0.0:8000
     volumes:
       - ./:/home/django
     networks:

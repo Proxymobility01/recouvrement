@@ -75,6 +75,10 @@ async def event_stream(compte_id, user_id, r_client):
             await pubsub.close()
         except Exception:
             pass
+        try:
+            await r_client.aclose()
+        except Exception:
+            pass
 
 
 async def sse_notifications(request):
@@ -120,5 +124,6 @@ async def sse_notifications(request):
     response['Cache-Control'] = 'no-cache, must-revalidate'
     response['X-Accel-Buffering'] = 'no'
     response['Connection'] = 'keep-alive'
+    response['Content-Encoding'] = 'identity'
 
     return response
