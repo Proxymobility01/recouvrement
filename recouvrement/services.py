@@ -115,26 +115,36 @@ class PaymentService:
                 response_collect = session.post(url_collect, json=collect_payload, headers=public_headers, timeout=15)
                 response_collect.raise_for_status()
 
+                try:
+                    collect_data = response_collect.json()
+                except ValueError:
+                    raise CustomAPIException(
+                        resp_code=ErrorCodes.SYSTEM_ERROR,
+                        status_code=502,
+                        dev_message="PayGate a répondu avec un format invalide (Non-JSON)."
+                    )
+
                 return {
                     "paygate_reference": paygate_reference,
                     "session_token": session_token,
-                    "collect_response": response_collect.json()
+                    "collect_response": collect_data
                 }
 
+
             except requests.exceptions.RequestException as e:
+                code_erreur_http = 504
+                details_erreur = "Le serveur n'a pas répondu (Timeout/Coupure réseau)."
                 if e.response is not None:
-                    logger.error(f"Détails de l'erreur renvoyée par la passerelle : {e.response.text}")
-
-                # 🚀 Remplacement par logger.exception
+                    code_erreur_http = e.response.status_code
+                    details_erreur = e.response.text
+                    logger.error(f"Détails de l'erreur renvoyée par la passerelle : {details_erreur}")
                 logger.exception(f"Erreur lors du traitement du flux de paiement pour la ref {external_reference}")
-
-                # 🚀 Utilisation de ErrorCodes et dev_message
                 raise CustomAPIException(
                     resp_code=ErrorCodes.MOBILE_MONEY_FAILED,
-                    status_code=502,
-                    dev_message=f"Erreur d'enchaînement sur la Gateway : {str(e)}"
-                )
+                    status_code=code_erreur_http,
+                    dev_message=f"Passerelle ({code_erreur_http}) : {details_erreur}"
 
+                )
     @classmethod
     def verifier_statut_transaction(cls, compte_id, gateway_reference):
         """
@@ -167,15 +177,18 @@ class PaymentService:
             return response.json()
 
         except requests.exceptions.RequestException as e:
-            if e.response is not None:
-                logger.error(f"Détails Échec Vérification PayGate (Ref: {gateway_reference}) : {e.response.text}")
+            code_erreur_http = 504
+            details_erreur = "Impossible de joindre la passerelle pour vérification."
 
-            # 🚀 Remplacement par logger.exception
+            if e.response is not None:
+                code_erreur_http = e.response.status_code
+                details_erreur = e.response.text
+                logger.error(f"Détails Échec Vérification PayGate (Ref: {gateway_reference}) : {details_erreur}")
+
             logger.exception(f"Erreur API Verify [{url}]")
 
-            # 🚀 Utilisation de ErrorCodes et dev_message
             raise CustomAPIException(
                 resp_code=ErrorCodes.MOBILE_MONEY_FAILED,
-                status_code=502,
-                dev_message=f"Erreur Gateway Verify [{url}]: {str(e)}"
+                status_code=code_erreur_http,
+                dev_message=f"Vérification ({code_erreur_http}) : {details_erreur}"
             )

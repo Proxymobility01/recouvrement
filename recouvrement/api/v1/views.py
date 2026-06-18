@@ -317,50 +317,29 @@ class InitiationPaiementView(GenericAPIView):
     """
     permission_classes = [IsAuthenticated, StrictDjangoModelPermissions]
     queryset = SessionPaiement.objects.all()
+    serializer_class = InitiationPaiementSerializer
 
     def post(self, request, *args, **kwargs):
         # 1. Validation des données d'entrée
-        serializer = InitiationPaiementSerializer(data=request.data, context={'request': request})
+        serializer = self.get_serializer(data=request.data, context={'request': request})
         serializer.is_valid(raise_exception=True)
 
         lignes = serializer.validated_data['lignes']
         phone_number = format_phone_cm(serializer.validated_data.get('phone_number'))
         total_montant = sum(ligne['montant'] for ligne in lignes)
 
-        # 2. Génération de la référence UNIQUE (En mémoire, on ne touche pas encore à la DB)
+        # 2. Génération de la référence UNIQUE (En mémoire)
         reference_session = Paiement.generer_reference_paiement("SESSION")
 
-        # ==========================================
-        # 3. 🚀 APPEL EXTERNE EN PREMIER
-        # ==========================================
-        try:
-            resultat_paiement = PaymentService.traiter_paiement_complet(
-                compte_id=request.user.compte_id,
-                montant=total_montant,
-                external_reference=reference_session,
-                phone_number=phone_number
-            )
-        except CustomAPIException:
-            # Si le service lève déjà une CustomAPIException propre, on la laisse passer
-            raise
-        except Exception as e:
-            # Si c'est un crash inattendu, on l'intercepte proprement
-            logger.exception("Le service de paiement mobile a échoué avant l'enregistrement local.")
-            raise CustomAPIException(
-                resp_code=ErrorCodes.MOBILE_MONEY_FAILED,
-                status_code=503,
-                dev_message=f"Crash inattendu du service PayGate : {str(e)}"
-            )
-
-        # ==========================================
-        # 4. 🛡️ SAUVEGARDE LOCALE (Uniquement si l'API a réussi)
-        # ==========================================
+        # ========================================================
+        # 🛡️ ÉTAPE 1 : ENREGISTREMENT LOCAL PRÉVENTIF IMMEUDIAT
+        # ========================================================
         try:
             with transaction.atomic():
-                # On crée le Parent en intégrant directement le gateway_reference
+                # On crée le Parent avec gateway_reference à None pour le moment
                 session_locale = SessionPaiement.objects.create(
                     reference=reference_session,
-                    gateway_reference=resultat_paiement.get('paygate_reference'),
+                    gateway_reference=None,
                     montant_total=total_montant,
                     telephone=phone_number,
                     utilisateur=request.user,
@@ -381,23 +360,90 @@ class InitiationPaiementView(GenericAPIView):
                         reference=Paiement.generer_reference_paiement(Paiement.METHODE_MOBILE_MONEY)
                     )
         except DatabaseError as e:
-            logger.exception("Erreur interne (DB) lors de la sauvegarde du panier de paiement.")
+            logger.exception("Erreur interne (DB) lors de la pré-sauvegarde du panier de paiement.")
             raise CustomAPIException(
                 resp_code=ErrorCodes.SYSTEM_ERROR,
                 status_code=500,
-                dev_message=f"Échec de l'insertion transactionnelle du paiement : {str(e)}"
+                dev_message=f"Échec de l'insertion transactionnelle initiale : {str(e)}"
             )
 
+        # ========================================================
+        # 🚀 ÉTAPE 2 : APPEL DE LA PASSERELLE (HORS BLOCK ATOMIC)
+        # ========================================================
+        try:
+            resultat_paiement = PaymentService.traiter_paiement_complet(
+                compte_id=request.user.compte_id,
+                montant=total_montant,
+                external_reference=reference_session,
+                phone_number=phone_number
+            )
+
+            # Si l'appel réussit : On complète la gateway_reference reçue
+            session_locale.gateway_reference = resultat_paiement.get('paygate_reference')
+            session_locale.save(update_fields=['gateway_reference'])
+
+        except CustomAPIException as exc:
+            # 🚨 INTERCEPTION DES ERREURS SERVEUR PASSERELLE / TIMEOUT (Codes 500 à 599)
+            if 500 <= exc.status_code <= 599:
+                logger.warning(
+                    f"[Incertitude Réseau] Erreur {exc.status_code} reçue de la passerelle pour {reference_session}. "
+                    "La ligne est conservée localement pour alignement asynchrone."
+                )
+
+                # On enrichit le payload pour le diagnostic mais on NE CHANGE PAS le statut EN_ATTENTE
+                session_locale.webhook_payload = {"status_code_initial": exc.status_code, "erreur": exc.dev_message}
+                session_locale.save(update_fields=['webhook_payload'])
+
+                # On déclenche le veilleur (Polling) plus tôt (20s au lieu de 60s) car le push USSD est peut-être parti
+                try:
+                    _schedule_next_verification(session_locale, 20)
+                except Exception:
+                    logger.exception("Impossible de planifier le polling d'urgence.")
+
+                # On lève l'erreur standardisée demandée pour informer le Front-End
+                raise CustomAPIException(
+                    resp_code=ErrorCodes.MOBILE_MONEY_FAILED,
+                    status_code=exc.status_code,
+                    dev_message=f"La passerelle externe est instable ({exc.status_code}). Sauvegarde préservée."
+                )
+
+            # Si c'est une vraie erreur fonctionnelle 400 (ex: numéro banni ou format invalide par l'opérateur)
+            session_locale.statut = SessionPaiement.STATUT_ECHEC
+            session_locale.webhook_payload = {"erreur_directe": exc.dev_message}
+            session_locale.save(update_fields=['statut', 'webhook_payload'])
+            raise exc
+
+        except Exception as e:
+            # Pour tout crash réseau imprévu ou timeout HTTP brut (non intercepté par le service)
+            logger.exception("Crash réseau imprévu ou Timeout lors du traitement du flux.")
+
+            session_locale.webhook_payload = {"erreur_brute": str(e)}
+            session_locale.save(update_fields=['webhook_payload'])
+
+            try:
+                _schedule_next_verification(session_locale, 20)
+            except Exception:
+                pass
+
+            raise CustomAPIException(
+                resp_code=ErrorCodes.MOBILE_MONEY_FAILED,
+                status_code=503,
+                dev_message=f"Incertitude totale sur la Gateway externe : {str(e)}"
+            )
+
+        # ========================================================
+        # 📈 ÉTAPE 3 : TOUT EST OK — PLANIFICATION COMMUNE
+        # ========================================================
         try:
             _schedule_next_verification(session_locale, 60)
-            logger.info(f"[Polling] Veilleur activé pour la session {session_locale.reference}")
+            logger.info(f"[Polling] Veilleur standard activé pour la session {session_locale.reference}")
         except Exception as e:
-            logger.exception(f"Impossible de planifier la vérification (Q Cluster) pour {session_locale.reference}.")
+            logger.exception(f"Impossible de planifier la vérification standard pour {session_locale.reference}.")
 
-        # 5. Tout s'est bien passé
+        # 5. Réponse de succès standard
         return Response({
             "success": True,
-            "message": "Demande de paiement  envoyée avec succès.",
+            "message": "Demande de paiement envoyée avec succès.",
             "reference_interne": session_locale.reference,
             "gateway_reference": session_locale.gateway_reference,
             "montant_total": total_montant,
