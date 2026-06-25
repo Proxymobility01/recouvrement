@@ -19,7 +19,7 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from accounts.models import ConfigPaiement
-from core.filters import LeaseFilter, ContratFilter, PaiementFilter
+from core.filters import LeaseFilter, ContratFilter, PaiementFilter, PenaliteFilter, ReglePenaliteFilter
 from core.pagination import StandardResultsSetPagination
 from core.permissions import StrictDjangoModelPermissions
 from core.utils import format_phone_cm
@@ -27,8 +27,9 @@ from core.api.v1.views import TenantModelViewSet
 from core.exceptions import CustomAPIException
 from core.errors import ErrorCodes
 from .serializers import ContratSerializer, LeaseSerializer, InitiationPaiementSerializer, PaiementSerializer, \
-    CalendrierSerializer, TypeContratSerializer, SousContratSerializer, ParametreSerializer
-from ...models import Contrat, Paiement, Lease, SessionPaiement, TypeContrat, Parametre
+    CalendrierSerializer, TypeContratSerializer, SousContratSerializer, ParametreSerializer, ReglePenaliteSerializer, \
+    PenaliteSerializer, SessionPaiementSerializer, AssignerRegleSerializer
+from ...models import Contrat, Paiement, Lease, SessionPaiement, TypeContrat, Parametre, ReglePenalite, Penalite
 from ...services import PaymentService
 from core.tasks import _schedule_next_verification
 
@@ -312,15 +313,31 @@ class LeaseViewSet(TenantModelViewSet):
 
 class InitiationPaiementView(GenericAPIView):
     """
-    Vue dédiée à l'initiation d'un paiement Mobile Money (Supporte le paiement par Lot/Batch).
-    Endpoint: POST /api/v1/initier-paiement/
+    Initiation d'un paiement Mobile Money (supporte le paiement par lot/batch).
+    Endpoint : POST /api/v1/initier-paiement/
+
+    LOGIQUE DE STATUT
+    -----------------
+    Checkout KO (quelle que soit la cause)
+        → ECHEC certain : rien n'a été créé côté PayGate.
+          Lignes enfants passées en ECHEC. Erreur renvoyée.
+
+    Checkout OK + Collect KO
+        → gateway_reference persistée.
+          Session reste EN_ATTENTE (l'utilisateur peut réessayer).
+          Erreur brute de PayGate remontée directement (400).
+
+    Checkout OK + Collect OK
+        → Session EN_ATTENTE + polling à 60s.
+          Réponse 201 avec pending:true.
     """
     permission_classes = [IsAuthenticated, StrictDjangoModelPermissions]
     queryset = SessionPaiement.objects.all()
     serializer_class = InitiationPaiementSerializer
 
     def post(self, request, *args, **kwargs):
-        # 1. Validation des données d'entrée
+
+        # ── 1. Validation ────────────────────────────────────────────────
         serializer = self.get_serializer(data=request.data, context={'request': request})
         serializer.is_valid(raise_exception=True)
 
@@ -328,15 +345,13 @@ class InitiationPaiementView(GenericAPIView):
         phone_number = format_phone_cm(serializer.validated_data.get('phone_number'))
         total_montant = sum(ligne['montant'] for ligne in lignes)
 
-        # 2. Génération de la référence UNIQUE (En mémoire)
-        reference_session = Paiement.generer_reference_paiement("SESSION")
+        reference_session = SessionPaiement.generer_reference_session()
 
-        # ========================================================
-        # 🛡️ ÉTAPE 1 : ENREGISTREMENT LOCAL PRÉVENTIF IMMEUDIAT
-        # ========================================================
+        # ================================================================
+        # 🛡️ ÉTAPE 1 : ENREGISTREMENT LOCAL (EN_ATTENTE par défaut)
+        # ================================================================
         try:
             with transaction.atomic():
-                # On crée le Parent avec gateway_reference à None pour le moment
                 session_locale = SessionPaiement.objects.create(
                     reference=reference_session,
                     gateway_reference=None,
@@ -344,10 +359,8 @@ class InitiationPaiementView(GenericAPIView):
                     telephone=phone_number,
                     utilisateur=request.user,
                     compte_id=request.user.compte_id,
-                    statut=SessionPaiement.STATUT_EN_ATTENTE
+                    statut=SessionPaiement.STATUT_EN_ATTENTE,
                 )
-
-                # On crée les Enfants (Les reçus comptables)
                 for ligne in lignes:
                     Paiement.objects.create(
                         session=session_locale,
@@ -357,92 +370,100 @@ class InitiationPaiementView(GenericAPIView):
                         compte_id=request.user.compte_id,
                         montant=ligne['montant'],
                         methode=Paiement.METHODE_MOBILE_MONEY,
-                        reference=Paiement.generer_reference_paiement(Paiement.METHODE_MOBILE_MONEY)
                     )
         except DatabaseError as e:
-            logger.exception("Erreur interne (DB) lors de la pré-sauvegarde du panier de paiement.")
+            logger.exception("Erreur DB lors de la pré-sauvegarde du panier.")
             raise CustomAPIException(
                 resp_code=ErrorCodes.SYSTEM_ERROR,
                 status_code=500,
-                dev_message=f"Échec de l'insertion transactionnelle initiale : {str(e)}"
+                dev_message=f"Échec de l'insertion transactionnelle initiale : {e}"
             )
 
-        # ========================================================
-        # 🚀 ÉTAPE 2 : APPEL DE LA PASSERELLE (HORS BLOCK ATOMIC)
-        # ========================================================
+        # ================================================================
+        # 🚀 ÉTAPE 2 : APPEL PASSERELLE
+        # ================================================================
         try:
-            resultat_paiement = PaymentService.traiter_paiement_complet(
+            resultat = PaymentService.traiter_paiement_complet(
                 compte_id=request.user.compte_id,
                 montant=total_montant,
                 external_reference=reference_session,
-                phone_number=phone_number
+                phone_number=phone_number,
             )
 
-            # Si l'appel réussit : On complète la gateway_reference reçue
-            session_locale.gateway_reference = resultat_paiement.get('paygate_reference')
-            session_locale.save(update_fields=['gateway_reference'])
-
         except CustomAPIException as exc:
-            # 🚨 INTERCEPTION DES ERREURS SERVEUR PASSERELLE / TIMEOUT (Codes 500 à 599)
-            if 500 <= exc.status_code <= 599:
-                logger.warning(
-                    f"[Incertitude Réseau] Erreur {exc.status_code} reçue de la passerelle pour {reference_session}. "
-                    "La ligne est conservée localement pour alignement asynchrone."
-                )
-
-                # On enrichit le payload pour le diagnostic mais on NE CHANGE PAS le statut EN_ATTENTE
-                session_locale.webhook_payload = {"status_code_initial": exc.status_code, "erreur": exc.dev_message}
-                session_locale.save(update_fields=['webhook_payload'])
-
-                # On déclenche le veilleur (Polling) plus tôt (20s au lieu de 60s) car le push USSD est peut-être parti
-                try:
-                    _schedule_next_verification(session_locale, 20)
-                except Exception:
-                    logger.exception("Impossible de planifier le polling d'urgence.")
-
-                # On lève l'erreur standardisée demandée pour informer le Front-End
-                raise CustomAPIException(
-                    resp_code=ErrorCodes.MOBILE_MONEY_FAILED,
-                    status_code=exc.status_code,
-                    dev_message=f"La passerelle externe est instable ({exc.status_code}). Sauvegarde préservée."
-                )
-
-            # Si c'est une vraie erreur fonctionnelle 400 (ex: numéro banni ou format invalide par l'opérateur)
+            # ── CHECKOUT KO : rien n'a été créé côté PayGate → ECHEC certain ──
+            logger.warning(
+                f"[Init] Checkout KO ({exc.status_code}) pour {reference_session}. "
+                "Passage en ECHEC."
+            )
             session_locale.statut = SessionPaiement.STATUT_ECHEC
-            session_locale.webhook_payload = {"erreur_directe": exc.dev_message}
+            session_locale.webhook_payload = {
+                "phase": "checkout",
+                "erreur": exc.dev_message,
+            }
             session_locale.save(update_fields=['statut', 'webhook_payload'])
+            Paiement.objects.filter(session=session_locale).update(
+                statut=Paiement.STATUT_ECHEC
+            )
             raise exc
 
         except Exception as e:
-            # Pour tout crash réseau imprévu ou timeout HTTP brut (non intercepté par le service)
-            logger.exception("Crash réseau imprévu ou Timeout lors du traitement du flux.")
-
-            session_locale.webhook_payload = {"erreur_brute": str(e)}
-            session_locale.save(update_fields=['webhook_payload'])
-
-            try:
-                _schedule_next_verification(session_locale, 20)
-            except Exception:
-                pass
-
+            # Crash Python non intercepté par le service → ECHEC certain
+            logger.exception("Crash inattendu lors de l'appel à la passerelle.")
+            session_locale.statut = SessionPaiement.STATUT_ECHEC
+            session_locale.webhook_payload = {"phase": "checkout", "erreur_brute": str(e)}
+            session_locale.save(update_fields=['statut', 'webhook_payload'])
+            Paiement.objects.filter(session=session_locale).update(
+                statut=Paiement.STATUT_ECHEC
+            )
             raise CustomAPIException(
                 resp_code=ErrorCodes.MOBILE_MONEY_FAILED,
                 status_code=503,
-                dev_message=f"Incertitude totale sur la Gateway externe : {str(e)}"
+                dev_message=f"Erreur inattendue lors de la communication avec la passerelle : {e}"
             )
 
-        # ========================================================
-        # 📈 ÉTAPE 3 : TOUT EST OK — PLANIFICATION COMMUNE
-        # ========================================================
+        # ================================================================
+        # ✅ ÉTAPE 3 : CHECKOUT OK
+        #    On persiste la gateway_reference IMMÉDIATEMENT.
+        # ================================================================
+        session_locale.gateway_reference = resultat['paygate_reference']
+        session_locale.save(update_fields=['gateway_reference'])
+
+        # ── Collect KO : push USSD non déclenché ─────────────────────────
+        # La session reste EN_ATTENTE : l'utilisateur peut réessayer.
+        # On stocke l'erreur PayGate et on la remonte directement.
+        if not resultat['collect_ok']:
+            collect_error = resultat.get('collect_error', 'Erreur inconnue de la passerelle.')
+            logger.warning(
+                f"[Init] Collect KO pour {reference_session}. "
+                f"Session EN_ATTENTE. Erreur : {collect_error}"
+            )
+            session_locale.webhook_payload = {
+                "phase": "collect",
+                "erreur": collect_error,
+            }
+            session_locale.save(update_fields=['webhook_payload'])
+
+            raise CustomAPIException(
+                resp_code=ErrorCodes.MOBILE_MONEY_FAILED,
+                status_code=400,
+                dev_message=collect_error,
+            )
+
+        # ── Collect OK : push USSD parti, on attend le webhook ───────────
         try:
             _schedule_next_verification(session_locale, 60)
-            logger.info(f"[Polling] Veilleur standard activé pour la session {session_locale.reference}")
-        except Exception as e:
-            logger.exception(f"Impossible de planifier la vérification standard pour {session_locale.reference}.")
+            logger.info(
+                f"[Polling] Veilleur activé pour la session {session_locale.reference}"
+            )
+        except Exception:
+            logger.exception(
+                f"Impossible de planifier la vérification pour {session_locale.reference}."
+            )
 
-        # 5. Réponse de succès standard
         return Response({
             "success": True,
+            "pending": True,
             "message": "Demande de paiement envoyée avec succès.",
             "reference_interne": session_locale.reference,
             "gateway_reference": session_locale.gateway_reference,
@@ -744,3 +765,101 @@ class ParametreViewSet(TenantModelViewSet):
             status_code=403,
             dev_message=f"Suppression interdite des paramètres de l'entreprise (ID: {instance.id})."
         )
+
+
+class ReglePenaliteViewSet(TenantModelViewSet):
+    permission_classes = [IsAuthenticated, StrictDjangoModelPermissions]
+    queryset = ReglePenalite.objects.all()
+    serializer_class = ReglePenaliteSerializer
+
+
+    filter_backends = [
+        DjangoFilterBackend,
+        filters.SearchFilter,
+        filters.OrderingFilter
+    ]
+
+    filterset_class = ReglePenaliteFilter
+    search_fields = ['nom_search']
+
+    # ↕️ Colonnes triables depuis le Front-End (Ex: /regles-penalites/?ordering=-montant)
+    ordering_fields = ['nom', 'montant', 'debut', 'created_at']
+
+    # Tri par défaut : les règles les plus récemment créées en premier
+    ordering = ['-created_at']
+
+    @action(detail=True, methods=['post'], url_path='assigner-contrats')
+    def assigner_contrats(self, request, pk=None):
+
+        regle = self.get_object()
+
+        serializer = AssignerRegleSerializer(
+            data=request.data,
+            context={'request': request}
+        )
+        serializer.is_valid(raise_exception=True)
+
+        contrat_ids = serializer.validated_data['contrat_ids']
+
+        # ✅ CORRECTION : On capture le nombre de lignes réellement modifiées
+        lignes_modifiees = Contrat.objects.filter(
+            id__in=contrat_ids,
+            compte_id=request.user.compte_id,
+        ).update(regle_penalite=regle)
+
+        return Response({
+            # On utilise 'lignes_modifiees' au lieu de 'len(contrat_ids)'
+            "message": f"La règle '{regle.nom}' a été appliquée avec succès à {lignes_modifiees} contrat(s)."
+        }, status=status.HTTP_200_OK)
+
+
+class PenaliteViewSet(TenantModelViewSet):
+    queryset = Penalite.objects.select_related('lease', 'lease__contrat').all()
+    serializer_class = PenaliteSerializer
+    http_method_names = ['get', 'head', 'options']
+    pagination_class = StandardResultsSetPagination
+    filter_backends = [
+        DjangoFilterBackend,
+        filters.SearchFilter,
+        filters.OrderingFilter
+    ]
+    filterset_class = PenaliteFilter
+    search_fields = ['nom_complet_search']
+    ordering = ['-date_application']
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        user = self.request.user
+        if user.is_superuser:
+            return qs
+        if user.has_perm('recouvrement.view_all_penalites'):
+            return qs
+        return qs.filter(lease__contrat__chauffeur=user)
+
+
+class SessionPaiementViewSet(TenantModelViewSet):
+
+    queryset = SessionPaiement.objects.select_related('utilisateur').all()
+    serializer_class = SessionPaiementSerializer
+    pagination_class = StandardResultsSetPagination
+    permission_classes = [IsAuthenticated, StrictDjangoModelPermissions]
+    http_method_names = ['get', 'head', 'options']
+
+    filter_backends = [
+        DjangoFilterBackend,
+        filters.SearchFilter,
+        filters.OrderingFilter,
+    ]
+    filterset_fields = ['statut']
+    search_fields = ['reference', 'telephone']
+    ordering_fields = ['created_at', 'montant_total', 'date_validation']
+    ordering = ['-created_at']
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        user = self.request.user
+        if user.is_superuser:
+            return qs
+        if user.has_perm('recouvrement.view_all_sessionpaiements'):
+            return qs
+        return qs.filter(utilisateur=user)

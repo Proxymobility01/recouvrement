@@ -91,11 +91,11 @@ class LeaseAdmin(admin.ModelAdmin):
 
 @admin.register(Paiement)
 class PaiementAdmin(admin.ModelAdmin):
-    list_display = ('reference', 'montant', 'methode', 'statut', 'date_paiement', 'compte_id')
+    list_display = ('montant', 'methode', 'statut', 'date_paiement', 'compte_id')
     list_filter = ('statut', 'methode', 'est_annule', 'compte_id')
-    search_fields = ('reference', 'nom_complet', 'session__reference')
+    search_fields = ('nom_complet', 'session__reference')
     raw_id_fields = ('contrat', 'lease', 'enregistre_par', 'session')
-    readonly_fields = ('nom_complet', 'nom_complet_search', 'reference', 'created_at', 'updated_at')
+    readonly_fields = ('nom_complet', 'nom_complet_search', 'created_at', 'updated_at')
     ordering = ('-date_paiement',)
 
 

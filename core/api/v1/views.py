@@ -67,15 +67,12 @@ class TenantModelViewSet(viewsets.ModelViewSet):
             serializer.save(compte_id=user.compte_id)
 
     def perform_destroy(self, instance):
-        # 🚀 TRAÇABILITÉ : Log d'audit obligatoire pour toute suppression système
+        user_id = getattr(self.request.user, 'keycloak_id', None) or self.request.user.pk
         logger.warning(
             f"[AUDIT] DELETE {instance.__class__.__name__} "
             f"id={instance.pk} compte_id={getattr(instance, 'compte_id', '?')} "
-            f"par user={self.request.user.keycloak_id}"
+            f"par user={user_id}"
         )
-
-        # Note : Pas besoin de try/except DatabaseError ici, DRF s'en charge très bien
-        # et notre custom_exception_handler renverra un beau 500 si la requête SQL échoue.
         instance.delete()
 
 

@@ -5,7 +5,7 @@ from django.contrib.postgres.indexes import GinIndex
 from django.core.validators import MinValueValidator
 from django.db import models, transaction
 from django.utils import timezone
-
+from django_q.models import Schedule
 from accounts.models import BaseModel, CustomUser
 from core.utils import remove_accents
 
@@ -139,6 +139,16 @@ class Contrat(BaseModel):
 
     statut = models.CharField(max_length=20, choices=STATUT_CHOICES, default=STATUT_ACTIF)
 
+    regle_penalite = models.ForeignKey(
+        'ReglePenalite',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="contrats",
+        verbose_name="Règle de pénalité appliquée",
+        help_text="Associer une règle pour activer la planification automatique des pénalités de retard."
+    )
+
     class Meta:
         db_table = "rc_contrat"
         constraints = [
@@ -263,9 +273,20 @@ class SessionPaiement(BaseModel):
         related_name="sessions_initiees"
     )
 
+    @classmethod
+    def generer_reference_session(cls) -> str:
+        """Génère une référence de session unique, cryptographiquement sûre."""
+        now = timezone.now()
+        date_str = now.strftime("%Y%m%d")
+        heure_str = now.strftime("%H%M%S")
+        random_suffix = secrets.token_hex(3).upper()
+        return f"MOB.{date_str}.{heure_str}.{random_suffix}"
 
     class Meta:
         db_table = "rc_session_paiement"
+        permissions = [
+            ("view_all_sessionpaiements", "Peut voir toutes les sessions de paiement du compte"),
+        ]
         indexes = [
             models.Index(fields=['compte_id', '-created_at'], name='idx_spaie_tenant_date'),
         ]
@@ -387,7 +408,6 @@ class Paiement(BaseModel):
 
     montant = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(Decimal('0.01'))])
     methode = models.CharField(max_length=20, choices=METHODE_CHOICES)
-    reference = models.CharField(max_length=255, unique=True)
     est_annule = models.BooleanField(default=False)
     statut = models.CharField(max_length=20, choices=STATUT_CHOICES, default=STATUT_EN_ATTENTE)
     date_paiement = models.DateTimeField(null=True, blank=True)
@@ -395,18 +415,6 @@ class Paiement(BaseModel):
     nom_complet = models.CharField(max_length=255, null=True, blank=True)
     nom_complet_search = models.CharField(max_length=255, null=True, blank=True)
 
-    @classmethod
-    def generer_reference_paiement(cls, methode):
-        """Génère une référence unique d'audit cryptographiquement sûre."""
-        prefix = "ESP" if methode == cls.METHODE_ESPECES else "MOB"
-        now = timezone.now()
-        date_str = now.strftime("%Y%m%d")
-        heure_str = now.strftime("%H%M%S")  # Ajout des secondes pour plus de précision
-
-        # 🚀 SÉCURITÉ CRYPTOGRAPHIQUE : Remplace random.choice
-        random_suffix = secrets.token_hex(3).upper()  # Ex: A1B2C3
-
-        return f"{prefix}.{date_str}.{heure_str}.{random_suffix}"
 
     def save(self, *args, **kwargs):
         # 1. On aspire le nom depuis le contrat lié au paiement
@@ -453,7 +461,8 @@ class Paiement(BaseModel):
 
 
     def __str__(self):
-        return f"Paiement {self.reference} - {self.montant}"
+        session_ref = self.session.reference if self.session else "sans session"
+        return f"Paiement #{self.pk} ({session_ref}) - {self.montant}"
 
 
 class Parametre(BaseModel):
@@ -475,3 +484,172 @@ class Parametre(BaseModel):
 
     def __str__(self):
         return f"Paramètres du compte {self.compte_id}"
+
+
+class ReglePenalite(BaseModel):
+    nom = models.CharField(
+        max_length=100, unique=True,
+        help_text="Ex: Tous les jours à 15h, Hebdomadaire le lundi..."
+    )
+
+    nom_search = models.CharField(max_length=255, null=True, blank=True)
+
+    # --- Paramètres Financiers ---
+    montant = models.DecimalField(
+        max_digits=10, decimal_places=2,
+        verbose_name="Montant de la pénalité (FCFA)"
+    )
+    # -1 pour l'infini, 0 pour ne pas s'exécuter, ou un nombre précis (2, 3...)
+    occurrences = models.IntegerField(
+        default=-1,
+        help_text="Nombre maximum de pénalités. Mettre -1 pour infini, 0 pour désactiver."
+    )
+
+    # --- Paramètres de Planification (Django-Q) ---
+    TYPE_CHOICES = [
+        (Schedule.ONCE, 'Une seule fois'),
+        (Schedule.HOURLY, 'Toutes les heures'),
+        (Schedule.DAILY, 'Tous les jours'),
+        (Schedule.WEEKLY, 'Toutes les semaines'),
+        (Schedule.MONTHLY, 'Tous les mois'),
+        (Schedule.CRON, 'Expression Cron (Avancé)'),
+    ]
+    frequence = models.CharField(
+        max_length=1,
+        choices=TYPE_CHOICES,
+        default=Schedule.DAILY,
+        verbose_name="Fréquence d'exécution"
+    )
+    cron_expression = models.CharField(
+        max_length=100,
+        blank=True, null=True,
+        help_text="Ex: '0 10,14,18 * * *' (Requis si Fréquence = Cron)."
+    )
+
+    # 🕒 Ton nouveau champ pour forcer le départ exact
+    debut = models.DateTimeField(
+        verbose_name="Date et heure de première exécution",
+        help_text="Détermine le moment exact (Date + Heure) où la tâche commencera son cycle."
+    )
+
+    class Meta:
+        db_table = "rc_regle_penalite"
+        verbose_name = "Règle de Pénalité"
+        verbose_name_plural = "Règles de Pénalité"
+        indexes = [
+            models.Index(fields=['frequence'], name='idx_regle_frequence'),
+            GinIndex(fields=['nom_search'], name='idx_nom_search_trgm', opclasses=['gin_trgm_ops']),
+        ]
+
+    def __str__(self):
+        return f"{self.nom} ({self.montant} FCFA)"
+
+    def save(self, *args, **kwargs):
+        if self.nom:
+            self.nom_search = remove_accents(self.nom).lower()
+        else:
+            self.nom_search = ""
+        update_fields = kwargs.get('update_fields')
+        if update_fields is not None:
+            update_fields = set(update_fields)
+            if 'nom' in update_fields:
+                update_fields.add('nom_search')
+
+            kwargs['update_fields'] = list(update_fields)
+
+        super().save(*args, **kwargs)
+
+
+class Penalite(BaseModel):
+    STATUT_NON_PAYE = 'NON_PAYE'
+    STATUT_PARTIEL = 'PARTIEL'
+    STATUT_PAYE = 'PAYE'
+
+    STATUT_CHOICES = [
+        (STATUT_NON_PAYE, 'Non payé'),
+        (STATUT_PARTIEL, 'Partiellement payé'),
+        (STATUT_PAYE, 'Payé'),
+    ]
+
+
+
+    lease = models.ForeignKey(
+        'Lease',
+        on_delete=models.PROTECT,
+        related_name="penalites",
+        verbose_name="Échéance associée"
+    )
+
+    nom_complet = models.CharField(
+        max_length=255,
+        verbose_name="Nom complet du chauffeur",
+        help_text="Nom figé au moment de l'application de la pénalité pour l'audit."
+    )
+
+    # 🔍 NOUVEAU : Champ technique invisible pour la recherche rapide
+    nom_complet_search = models.CharField(
+        max_length=255,
+        blank=True,
+        verbose_name="Nom complet (Recherche optimisée)"
+    )
+
+    montant = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        verbose_name="Montant de la pénalité (FCFA)"
+    )
+
+    date_application = models.DateTimeField(
+        default=timezone.now,
+        verbose_name="Date et heure de sanction"
+    )
+
+    statut = models.CharField(max_length=20, choices=STATUT_CHOICES, default=STATUT_NON_PAYE)
+
+    motif = models.CharField(
+        max_length=255,
+        verbose_name="Motif / Justification",
+        help_text="Ex: Première pénalité de retard, 2ème occurrence..."
+    )
+
+    class Meta:
+        db_table = "rc_penalite"
+        ordering = ['-date_application']
+        verbose_name = "Pénalité de retard"
+        verbose_name_plural = "Pénalités de retard"
+        permissions = [
+            ("view_all_penalites", "Peut voir toutes les pénalités de l'entreprise"),
+        ]
+        indexes = [
+            models.Index(fields=['-date_application'], name='idx_penalite_date_desc'),
+            models.Index(fields=['lease', '-date_application'], name='idx_penalite_lease_date'),
+            GinIndex(
+                fields=['nom_complet_search'],
+                name='idx_penal_search_trgm',
+                opclasses=['gin_trgm_ops']
+            ),
+        ]
+
+    def __str__(self):
+        date_str = self.date_application.strftime('%d/%m/%Y %H:%M') if self.date_application else "—"
+        return f"Pénalité de {self.montant} FCFA - {self.nom_complet} ({date_str})"
+
+    def save(self, *args, **kwargs):
+        # 1. Génération automatique du champ de recherche nettoyé
+        if self.nom_complet:
+            self.nom_complet_search = remove_accents(self.nom_complet).lower()
+        else:
+            self.nom_complet_search = ""
+
+        # 2. Gestion intelligente des update_fields pour ne pas rater la mise à jour
+        update_fields = kwargs.get('update_fields')
+        if update_fields is not None:
+            update_fields = set(update_fields)
+
+            # Si le code tente de sauvegarder 'nom_complet', on force la sauvegarde de 'nom_complet_search'
+            if 'nom_complet' in update_fields:
+                update_fields.add('nom_complet_search')
+
+            kwargs['update_fields'] = list(update_fields)
+
+        super().save(*args, **kwargs)

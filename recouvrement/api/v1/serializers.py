@@ -1,46 +1,36 @@
+import re
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 from rest_framework import serializers
 from decimal import Decimal
-from recouvrement.models import Contrat, Lease, Paiement, TypeContrat, Parametre
+from django_q.models import Schedule
+from recouvrement.models import Contrat, Lease, Paiement, TypeContrat, Parametre, ReglePenalite, Penalite, \
+    SessionPaiement
 
 
 class TypeContratSerializer(serializers.ModelSerializer):
     class Meta:
         model = TypeContrat
         fields = [
-            'id',
-            'libelle',
-            'code',
-            'est_principal',
-            'created_at',
-            'updated_at'
+            'id', 'libelle', 'code', 'est_principal',
+            'created_at', 'updated_at'
         ]
         read_only_fields = ['created_at', 'updated_at']
 
-    class TypeContratSerializer(serializers.ModelSerializer):
-        class Meta:
-            model = TypeContrat
-            fields = [
-                'id', 'libelle', 'code', 'est_principal',
-                'created_at', 'updated_at'
-            ]
-            read_only_fields = ['created_at', 'updated_at']
+    def validate_code(self, value):
+        code_formate = value.strip().upper()
+        request = self.context.get('request')
 
-        def validate_code(self, value):
-            code_formate = value.strip().upper()
-            request = self.context.get('request')
+        if request and request.user:
+            qs = TypeContrat.objects.filter(code=code_formate, compte_id=request.user.compte_id)
+            if self.instance:
+                qs = qs.exclude(id=self.instance.id)
 
-            if request and request.user:
-                qs = TypeContrat.objects.filter(code=code_formate, compte_id=request.user.compte_id)
-                if self.instance:
-                    qs = qs.exclude(id=self.instance.id)
+            if qs.exists():
+                raise serializers.ValidationError("Ce code existe déjà.")
 
-                if qs.exists():
-                    raise serializers.ValidationError("Ce code existe déjà.")
-
-            return code_formate
+        return code_formate
 
     def validate_libelle(self, value):
         libelle_formate = value.strip()
@@ -429,8 +419,6 @@ class PaiementSerializer(serializers.ModelSerializer):
         validated_data['statut'] = Paiement.STATUT_VALIDE
         validated_data['date_paiement'] = timezone.now()
 
-        validated_data['reference'] = Paiement.generer_reference_paiement(Paiement.METHODE_ESPECES)
-
         with transaction.atomic():
             paiement = super().create(validated_data)
 
@@ -498,3 +486,142 @@ class ParametreSerializer(serializers.ModelSerializer):
             # set() enlève les doublons, sorted() les remet dans l'ordre (0 à 6)
             return sorted(list(set(value)))
         return []
+
+
+class ReglePenaliteSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ReglePenalite
+        fields = [
+            'id',
+            'nom',
+            'montant',
+            'occurrences',
+            'frequence',
+            'cron_expression',
+            'debut',
+            'created_at',
+            'updated_at'
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def validate_nom(self, value):
+        """
+        Nettoie et valide le nom de la règle.
+        - Minimum 2 caractères.
+        - Uniquement lettres (avec accents), chiffres, espaces, tirets et underscores.
+        """
+        nom_nettoye = value.strip()
+
+        if len(nom_nettoye) < 2:
+            raise serializers.ValidationError("Le nom doit contenir au moins 2 caractères.")
+        if not re.match(r"^[\w\s\-\u00C0-\u024F]+$", nom_nettoye, re.UNICODE):
+            raise serializers.ValidationError(
+                "Utilisez uniquement des lettres, chiffres, espaces et tirets."
+            )
+
+        return nom_nettoye
+
+    def validate_occurrences(self, value):
+        """
+        S'assure que le plafond d'occurrences respecte la convention Django-Q (-1 pour infini).
+        """
+        if value < -1:
+            raise serializers.ValidationError("Le nombre d'occurrences ne peut pas être inférieur à -1.")
+        return value
+
+    def validate_cron_expression(self, value):
+        """
+        Valide que l'expression Cron correspond au format standard (5 parties).
+        Exemples valides : "* * * * *", "0 14,16 * * *", "*/15 * * * 1-5"
+        """
+        if value:
+            # Cette Regex vérifie qu'il y a exactement 5 blocs séparés par des espaces.
+            # Chaque bloc peut contenir des chiffres, *, /, - ou ,
+            cron_regex = r'^(\*|[0-5]?\d)([\/\,\-][0-5]?\d)* (\*|[0-2]?\d)([\/\,\-][0-2]?\d)* (\*|[0-3]?\d)([\/\,\-][0-3]?\d)* (\*|[0-1]?\d)([\/\,\-][0-1]?\d)* (\*|[0-7])([\/\,\-][0-7])*$'
+
+            if not re.match(cron_regex, value.strip()):
+                raise serializers.ValidationError(
+                    "Format Cron invalide. L'expression doit contenir 5 parties (ex: '0 14,16 * * *')."
+                )
+        return value
+
+    def validate(self, data):
+        """
+        Validation croisée (Logique métier globale).
+        """
+        frequence = data.get('frequence', getattr(self.instance, 'frequence', None))
+        cron_expression = data.get('cron_expression', getattr(self.instance, 'cron_expression', None))
+        if frequence == Schedule.CRON:
+            if not cron_expression or cron_expression.strip() == "":
+                raise serializers.ValidationError({
+                    "cron_expression": "L'expression Cron est requise lorsque la fréquence est réglée sur 'Expression Cron'."
+                })
+        else:
+            data['cron_expression'] = None
+
+        return data
+
+
+class PenaliteSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Penalite
+        fields = [
+            'id',
+            'lease',
+            'nom_complet',
+            'montant',
+            'date_application',
+            'motif',
+            'created_at'
+        ]
+        read_only_fields = [
+            'id', 'lease', 'nom_complet', 'montant',
+            'date_application', 'motif', 'created_at'
+        ]
+
+
+class SessionPaiementSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SessionPaiement
+        fields = [
+            'id',
+            'reference',
+            'statut',
+            'montant_total',
+            'telephone',
+            'date_validation',
+            'created_at',
+        ]
+        read_only_fields = fields
+
+
+class AssignerRegleSerializer(serializers.Serializer):
+    contrat_ids = serializers.ListField(
+        child=serializers.IntegerField(),
+        allow_empty=False,
+    )
+    def validate_contrat_ids(self, value):
+        user = self.context['request'].user
+        ids_uniques = list(set(value))
+
+        # Une seule requête qui récupère les IDs valides
+        ids_valides = list(
+            Contrat.objects.filter(
+                id__in=ids_uniques,
+                compte_id=user.compte_id
+            ).exclude(
+                statut__in=[
+                    Contrat.STATUT_SOLDE,
+                    Contrat.STATUT_CONTENTIEUX,
+                    Contrat.STATUT_SUSPENDU
+                ]
+            ).values_list('id', flat=True)
+        )
+
+        ids_invalides = [cid for cid in ids_uniques if cid not in ids_valides]
+        if ids_invalides:
+            raise serializers.ValidationError(
+                f"Contrats introuvables ou invalides : {ids_invalides}"
+            )
+
+        return ids_uniques

@@ -1,16 +1,18 @@
 import logging
+from collections import Counter
 from datetime import timedelta
 from decimal import Decimal
 
 from django.core.management import call_command
 from django.db import transaction, DatabaseError
+from django.db.models import Count, F
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from django_q.tasks import async_task, schedule
 from django_q.models import Schedule
 
-from core.utils import notifier_utilisateur
-from recouvrement.models import SessionPaiement, Paiement, Lease, Contrat
+from core.utils import notifier_utilisateur, remove_accents
+from recouvrement.models import SessionPaiement, Paiement, Lease, Contrat, ReglePenalite, Penalite
 from recouvrement.services import PaymentService
 from statistiques.services import statistiques_du_jour
 
@@ -30,6 +32,7 @@ def paiement_task(session_id, statut_gateway):
         with transaction.atomic():
             lignes_paiement = Paiement.objects.select_for_update().filter(
                 session=session,
+                compte_id=session.compte_id,
                 statut=Paiement.STATUT_EN_ATTENTE
             )
 
@@ -245,3 +248,121 @@ def generer_leases_quotidien_task():
     except Exception:
         logger.exception("[GenererLeasesQuotidienTask] ❌ Échec critique lors de la génération des échéances.")
         raise
+
+
+def appliquer_penalite_task(regle_id):
+
+    logger.info(f"[Pénalités] Démarrage de l'évaluation pour la règle ID: {regle_id}")
+
+    try:
+        regle = ReglePenalite.objects.get(id=regle_id)
+    except ReglePenalite.DoesNotExist:
+        logger.error(f"[Pénalités] Règle {regle_id} introuvable en base. Arrêt de la tâche.")
+        return
+
+    # Sécurité : règle désactivée (occurrences=0)
+    if regle.occurrences == 0:
+        logger.info(f"[Pénalités] La règle '{regle.nom}' est désactivée (occurrences=0). Arrêt.")
+        return
+
+    aujourdhui = timezone.now().date()
+
+    # ================================================================
+    # ÉTAPE 1 : FILTRAGE ET COMPTAGE (Sans verrou)
+    # ================================================================
+    leases_cibles = Lease.objects.filter(
+        compte_id=regle.compte_id,
+        contrat__regle_penalite=regle,
+        statut__in=[Lease.STATUT_NON_PAYE, Lease.STATUT_PARTIEL],
+        date_echeance__lte=aujourdhui,
+    ).exclude(
+        contrat__statut__in=['SUSPENDU', 'CONTENTIEUX', 'SOLDE']
+    ).annotate(
+        nb_penalites_existantes=Count('penalites')
+    )
+
+    # Plafond par lease : on exclut ceux qui ont déjà atteint leur quota
+    if regle.occurrences > -1:
+        leases_cibles = leases_cibles.filter(
+            nb_penalites_existantes__lt=regle.occurrences
+        )
+
+    # 🚀 ASTUCE : On extrait les résultats dans un dictionnaire en mémoire.
+    # Format : {id_du_lease: nombre_de_penalites}
+    lease_data = dict(leases_cibles.values_list('id', 'nb_penalites_existantes'))
+
+    if not lease_data:
+        logger.info(
+            f"[Pénalités] Règle '{regle.nom}' : "
+            "aucun bail en retard éligible ou tous les plafonds atteints."
+        )
+        return
+
+    # ================================================================
+    # ÉTAPE 2 : VERROUILLAGE ET PRÉPARATION (Sans aggregation/GROUP BY)
+    # ================================================================
+    penalites_a_creer = []
+    lease_ids = []
+
+    with transaction.atomic():
+        # 🚀 CORRECTION : On refait la requête juste avec les IDs, ce qui
+        # permet à PostgreSQL d'appliquer le verrou sans lever d'erreur.
+        leases_a_traiter = list(
+            Lease.objects.select_related('contrat')
+            .filter(id__in=lease_data.keys())
+            .select_for_update(of=('self', 'contrat'))
+        )
+
+        for lease in leases_a_traiter:
+            contrat = lease.contrat
+
+            # On récupère le nombre de pénalités calculé à l'étape 1
+            numero_occurrence = lease_data[lease.id] + 1
+            limite = "∞" if regle.occurrences == -1 else str(regle.occurrences)
+            date_str = lease.date_echeance.strftime('%d/%m/%Y')
+            nom_nettoye = (
+                remove_accents(contrat.nom_complet).lower()
+                if contrat.nom_complet else ""
+            )
+
+            penalites_a_creer.append(Penalite(
+                compte_id=contrat.compte_id,
+                lease=lease,
+                nom_complet=contrat.nom_complet,
+                nom_complet_search=nom_nettoye,
+                statut=Penalite.STATUT_NON_PAYE,
+                montant=regle.montant,
+                motif=f"Paiement manqué pour la date du {date_str} ({numero_occurrence}/{limite})",
+                date_application=timezone.now(),
+            ))
+            lease_ids.append(lease.id)
+
+        # ================================================================
+        # ÉTAPE 3 : INSERTION ET MISE À JOUR EN MASSE
+        # ================================================================
+
+        # 3a. Insertion des pénalités
+        if penalites_a_creer:
+            Penalite.objects.bulk_create(penalites_a_creer)
+
+        # 3b. Mise à jour des leases (chaque lease reçoit exactement regle.montant)
+        if lease_ids:
+            Lease.objects.filter(id__in=lease_ids).update(
+                montant_attendu=F('montant_attendu') + regle.montant
+            )
+
+        # 3c. Mise à jour des contrats
+        penalites_par_contrat = Counter(l.contrat_id for l in leases_a_traiter)
+
+        for contrat_id, nb_leases in penalites_par_contrat.items():
+            montant_a_ajouter = regle.montant * nb_leases
+            Contrat.objects.filter(id=contrat_id).update(
+                montant_total=F('montant_total') + montant_a_ajouter,
+                montant_restant=F('montant_restant') + montant_a_ajouter,
+            )
+
+    logger.info(
+        f"[Pénalités] Règle '{regle.nom}' exécutée avec succès : "
+        f"{len(penalites_a_creer)} pénalité(s) générée(s) "
+        f"sur {len(penalites_par_contrat)} contrat(s)."
+    )

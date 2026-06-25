@@ -1,7 +1,7 @@
 import django_filters
 from django_filters import rest_framework as filters
 
-from recouvrement.models import Lease, Contrat, Paiement
+from recouvrement.models import Lease, Contrat, Paiement, ReglePenalite, Penalite
 
 
 class CharInFilter(django_filters.BaseInFilter, django_filters.CharFilter):
@@ -123,4 +123,65 @@ class PaiementFilter(filters.FilterSet):
             'statut',
             'methode',
             'est_annule',
+        ]
+
+
+class ReglePenaliteFilter(filters.FilterSet):
+    # ==========================================
+    # 1. FILTRES MULTIPLES (IN)
+    # ==========================================
+    frequence__in = CharInFilter(field_name='frequence', lookup_expr='in')
+
+    # ==========================================
+    # 2. FILTRES FINANCIERS
+    # ==========================================
+    montant_min = filters.NumberFilter(field_name="montant", lookup_expr='gte')
+    montant_max = filters.NumberFilter(field_name="montant", lookup_expr='lte')
+
+    # ==========================================
+    # 3. RANGES DE DATES (debut est un DateTimeField)
+    # ==========================================
+    debut_start = filters.DateFilter(field_name="debut__date", lookup_expr='gte')
+    debut_end = filters.DateFilter(field_name="debut__date", lookup_expr='lte')
+    debut = filters.DateFilter(field_name="debut__date", lookup_expr='exact')
+
+    class Meta:
+        model = ReglePenalite
+        fields = [
+            'frequence',
+            'occurrences',
+        ]
+
+
+class PenaliteFilter(filters.FilterSet):
+    # ==========================================
+    # 1. FILTRES MULTIPLES (IN)
+    # ==========================================
+    statut__in = CharInFilter(field_name='statut', lookup_expr='in')
+
+    # ==========================================
+    # 2. FILTRES FINANCIERS
+    # ==========================================
+    montant_min = filters.NumberFilter(field_name="montant", lookup_expr='gte')
+    montant_max = filters.NumberFilter(field_name="montant", lookup_expr='lte')
+
+    # ==========================================
+    # 3. RANGES DE DATES (date_application = DateTimeField)
+    # ==========================================
+    date_application_start = filters.DateFilter(field_name="date_application__date", lookup_expr='gte')
+    date_application_end = filters.DateFilter(field_name="date_application__date", lookup_expr='lte')
+    date_application = filters.DateFilter(field_name="date_application__date", lookup_expr='exact')
+
+    created_at_start = filters.DateFilter(field_name="created_at__date", lookup_expr='gte')
+    created_at_end = filters.DateFilter(field_name="created_at__date", lookup_expr='lte')
+
+
+    # 🚀 ASTUCE : Permet au Front-End de récupérer toutes les pénalités d'un contrat
+    # entier en traversant la relation : Penalite -> Lease -> Contrat
+    contrat_id = filters.NumberFilter(field_name="lease__contrat_id")
+
+    class Meta:
+        model = Penalite
+        fields = [
+            'statut',
         ]

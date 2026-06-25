@@ -33,3 +33,4 @@ class RecouvrementConfig(AppConfig):
 
     def ready(self):
         post_migrate.connect(setup_scheduled_tasks, sender=self)
+        import recouvrement.signals
