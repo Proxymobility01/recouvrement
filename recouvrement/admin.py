@@ -1,5 +1,14 @@
 from django.contrib import admin
-from .models import TypeContrat, Contrat, SessionPaiement, Lease, Paiement, Parametre
+from .models import (
+    TypeContrat,
+    Contrat,
+    SessionPaiement,
+    Lease,
+    Paiement,
+    Parametre,
+    ReglePenalite,
+    Penalite
+)
 
 
 # ==========================================
@@ -34,11 +43,11 @@ class TypeContratAdmin(admin.ModelAdmin):
 class ContratAdmin(admin.ModelAdmin):
     list_display = ('reference', 'nom_complet', 'type_contrat', 'statut', 'montant_total', 'montant_restant',
                     'compte_id')
-    list_filter = ('statut', 'frequence', 'type_contrat', 'compte_id')
+    list_filter = ('statut', 'frequence', 'type_contrat', 'compte_id', 'regle_penalite')
     search_fields = ('reference', 'nom_complet', 'immatriculation', 'vin', 'chauffeur__email')
 
     # 🚀 raw_id_fields : Indispensable pour ne pas faire crasher la page s'il y a 10 000 chauffeurs
-    raw_id_fields = ('chauffeur', 'enregistre_par', 'parent')
+    raw_id_fields = ('chauffeur', 'enregistre_par', 'parent', 'regle_penalite')
 
     # On bloque la modification manuelle des champs générés/calculés
     readonly_fields = ('reference', 'nom_complet_search', 'montant_paye', 'created_at', 'updated_at')
@@ -55,7 +64,8 @@ class ContratAdmin(admin.ModelAdmin):
             'fields': ('immatriculation', 'vin', 'specificites')
         }),
         ('Finances & Échéancier', {
-            'fields': ('montant_total', 'montant_restant', 'montant_paye', 'montant_par_paiement', 'frequence')
+            'fields': ('montant_total', 'montant_restant', 'montant_paye', 'montant_par_paiement', 'frequence',
+                       'regle_penalite')
         }),
         ('Dates', {
             'fields': ('date_debut', 'date_fin', 'prochaine_echeance', 'created_at', 'updated_at')
@@ -115,3 +125,58 @@ class ParametreAdmin(admin.ModelAdmin):
             return str(obj.jours_repos)
 
     jours_repos_display.short_description = 'Jours de repos'
+
+
+# ==========================================
+# 3. NOUVEAUX ADMINS : PÉNALITÉS
+# ==========================================
+
+@admin.register(ReglePenalite)
+class ReglePenaliteAdmin(admin.ModelAdmin):
+    list_display = ('nom', 'montant', 'frequence', 'occurrences', 'debut', 'compte_id')
+    list_filter = ('frequence', 'compte_id')
+    search_fields = ('nom', 'nom_search')
+    readonly_fields = ('nom_search', 'created_at', 'updated_at')
+    ordering = ('-created_at',)
+
+    fieldsets = (
+        ('Configuration Principale', {
+            'fields': ('compte_id', 'nom', 'nom_search')
+        }),
+        ('Paramètres Financiers', {
+            'fields': ('montant', 'occurrences')
+        }),
+        ('Planification', {
+            'fields': ('frequence', 'cron_expression', 'debut')
+        }),
+        ('Dates Système', {
+            'fields': ('created_at', 'updated_at')
+        }),
+    )
+
+
+@admin.register(Penalite)
+class PenaliteAdmin(admin.ModelAdmin):
+    list_display = ('nom_complet', 'montant', 'statut', 'date_application', 'lease', 'compte_id')
+    list_filter = ('statut', 'compte_id', 'date_application')
+
+    # On permet la recherche sur le nom, le motif et la référence du contrat lié au lease
+    search_fields = ('nom_complet', 'nom_complet_search', 'motif', 'lease__contrat__reference')
+
+    # raw_id_fields indispensable car il peut y avoir des milliers d'échéances
+    raw_id_fields = ('lease',)
+
+    readonly_fields = ('nom_complet_search', 'created_at', 'updated_at')
+    ordering = ('-date_application',)
+
+    fieldsets = (
+        ('Liaison', {
+            'fields': ('compte_id', 'lease', 'nom_complet', 'nom_complet_search')
+        }),
+        ('Détails de la Sanction', {
+            'fields': ('montant', 'statut', 'motif', 'date_application')
+        }),
+        ('Dates Système', {
+            'fields': ('created_at', 'updated_at')
+        }),
+    )
