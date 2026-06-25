@@ -1,6 +1,6 @@
 import multiprocessing
-
-
+import environ
+env = environ.Env()
 # ==========================================
 # RÉSEAU & LIAISON
 # ==========================================
@@ -11,7 +11,7 @@ bind = "0.0.0.0:8000"
 # PERFORMANCES (Workers & Threads)
 # ==========================================
 # Formule standard de Gunicorn pour exploiter à fond le CPU
-workers = multiprocessing.cpu_count()
+workers = min((2 * multiprocessing.cpu_count()) + 1, 4)
 
 worker_class = "uvicorn.workers.UvicornWorker"
 
@@ -21,6 +21,7 @@ worker_connections = 1000
 # GESTION DE LA MÉMOIRE (Anti-fuites)
 # ==========================================
 # Gunicorn redémarre un worker automatiquement après 1000 requêtes
+preload_app = True
 max_requests = 1000
 # Le jitter évite que tous les workers redémarrent exactement en même temps
 max_requests_jitter = 100
@@ -29,7 +30,7 @@ max_requests_jitter = 100
 # TIMEOUTS & STABILITÉ
 # ==========================================
 # 120 secondes max par requête (utile si ton API fait des appels externes un peu lents)
-timeout = 0
+timeout = 120
 graceful_timeout = 30
 keepalive = 75
 
@@ -46,10 +47,8 @@ capture_output = True
 # ==========================================
 # SÉCURITÉ & NOMMAGE
 # ==========================================
-proc_name = "recouvrement_backend"
+proc_name = env("APP_PROC_NAME", default="recouvrement_backend")
 
-# Charge l'application en mémoire avant de forker les workers (réduit la RAM globale)
-preload_app = False
 
 # Limites pour éviter les attaques DDoS par requêtes malformées
 limit_request_line = 4094
