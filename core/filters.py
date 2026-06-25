@@ -1,7 +1,7 @@
 import django_filters
 from django_filters import rest_framework as filters
 
-from recouvrement.models import Lease, Contrat, Paiement, ReglePenalite, Penalite
+from recouvrement.models import Lease, Contrat, Paiement, ReglePenalite, Penalite, SessionPaiement
 
 
 class CharInFilter(django_filters.BaseInFilter, django_filters.CharFilter):
@@ -184,4 +184,31 @@ class PenaliteFilter(filters.FilterSet):
         model = Penalite
         fields = [
             'statut',
+        ]
+
+
+class SessionPaiementFilter(filters.FilterSet):
+    # ==========================================
+    # 1. FILTRES MULTIPLES (IN) ET RECHERCHE PARTIELLE
+    # ==========================================
+    statut__in = CharInFilter(field_name='statut', lookup_expr='in')
+    reference__icontains = filters.CharFilter(field_name='reference', lookup_expr='icontains')
+    telephone__icontains = filters.CharFilter(field_name='telephone', lookup_expr='icontains')
+    montant_total_min = filters.NumberFilter(field_name="montant_total", lookup_expr='gte')
+    montant_total_max = filters.NumberFilter(field_name="montant_total", lookup_expr='lte')
+
+
+    date_validation_start = filters.DateFilter(field_name="date_validation__date", lookup_expr='gte')
+    date_validation_end = filters.DateFilter(field_name="date_validation__date", lookup_expr='lte')
+    date_validation = filters.DateFilter(field_name="date_validation__date", lookup_expr='exact')
+
+
+
+    class Meta:
+        model = SessionPaiement
+        fields = [
+            'statut',
+            'reference',
+            'gateway_reference',
+            'telephone',
         ]

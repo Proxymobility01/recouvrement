@@ -19,7 +19,8 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from accounts.models import ConfigPaiement
-from core.filters import LeaseFilter, ContratFilter, PaiementFilter, PenaliteFilter, ReglePenaliteFilter
+from core.filters import LeaseFilter, ContratFilter, PaiementFilter, PenaliteFilter, ReglePenaliteFilter, \
+    SessionPaiementFilter
 from core.pagination import StandardResultsSetPagination
 from core.permissions import StrictDjangoModelPermissions
 from core.utils import format_phone_cm
@@ -850,7 +851,7 @@ class SessionPaiementViewSet(TenantModelViewSet):
         filters.SearchFilter,
         filters.OrderingFilter,
     ]
-    filterset_fields = ['statut']
+    filterset_class = SessionPaiementFilter
     search_fields = ['reference', 'telephone']
     ordering_fields = ['created_at', 'montant_total', 'date_validation']
     ordering = ['-created_at']

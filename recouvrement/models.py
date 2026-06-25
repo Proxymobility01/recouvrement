@@ -289,6 +289,17 @@ class SessionPaiement(BaseModel):
         ]
         indexes = [
             models.Index(fields=['compte_id', '-created_at'], name='idx_spaie_tenant_date'),
+            GinIndex(
+                fields=['reference'],
+                name='idx_spaie_ref_trgm',
+                opclasses=['gin_trgm_ops']
+            ),
+            GinIndex(
+                fields=['telephone'],
+                name='idx_spaie_tel_trgm',
+                opclasses=['gin_trgm_ops']
+            ),
+
         ]
 
 
