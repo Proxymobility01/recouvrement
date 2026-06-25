@@ -269,7 +269,7 @@ LOGGING = {
 
 Q_CLUSTER = {
     'name': 'rc_cluster',
-    'workers': 8,
+    'workers': 2,
     'recycle': 500,
     'timeout': 90,
     'retry': 120,
