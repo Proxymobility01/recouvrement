@@ -373,12 +373,12 @@ class PaiementSerializer(serializers.ModelSerializer):
     class Meta:
         model = Paiement
         fields = [
-            'id', 'lease_id', 'montant', 'methode', 'reference',
+            'id', 'lease_id', 'montant', 'methode',
             'transaction_id', 'statut', 'date_paiement',
             'chauffeur_nom_complet', 'enregistre_par'
         ]
         read_only_fields = [
-            'methode', 'reference', 'transaction_id', 'statut',
+            'methode', 'transaction_id', 'statut',
             'date_paiement', 'chauffeur_nom_complet', 'enregistre_par'
         ]
 
