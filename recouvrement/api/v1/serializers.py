@@ -99,14 +99,14 @@ class ContratSerializer(serializers.ModelSerializer):
         model = Contrat
         fields = [
             'id', 'reference', 'compte_id', 'chauffeur', 'immatriculation', 'vin', 'nom_complet',
-            'type_contrat','type_contrat_libelle', 'parent',
+            'type_contrat', 'type_contrat_libelle', 'parent',
             'enregistre_par', 'enregistre_par_nom_complet', 'chauffeur_nom_complet',
-            'montant_total', 'montant_restant','montant_paye', 'montant_par_paiement',
+            'montant_total', 'montant_restant', 'montant_paye', 'montant_par_paiement',
             'frequence', 'date_debut', 'date_fin', 'prochaine_echeance',
-            'statut','specificites', 'created_at', 'updated_at'
+            'statut', 'specificites', 'created_at', 'updated_at'
         ]
         read_only_fields = [
-            'reference', 'statut', 'montant_restant', 'enregistre_par',
+            'reference', 'montant_restant', 'enregistre_par',
             'created_at', 'updated_at', 'nom_complet', 'compte_id'
         ]
         extra_kwargs = {
@@ -116,8 +116,8 @@ class ContratSerializer(serializers.ModelSerializer):
             'date_debut': {'required': True},
             'prochaine_echeance': {'required': True},
             'date_fin': {'required': True},
-            'vin':{'required': True,'allow_blank': False,'allow_null': False},
-            'immatriculation': {'required': True,'allow_blank': False,'allow_null': False},
+            'vin': {'required': True, 'allow_blank': False, 'allow_null': False},
+            'immatriculation': {'required': True, 'allow_blank': False, 'allow_null': False},
         }
 
     def validate_type_contrat(self, value):
@@ -140,8 +140,6 @@ class ContratSerializer(serializers.ModelSerializer):
 
     def get_fields(self):
         fields = super().get_fields()
-        if self.instance and 'montant_paye' in fields:
-            fields['montant_paye'].read_only = True
         return fields
 
     def validate(self, attrs):
@@ -151,7 +149,6 @@ class ContratSerializer(serializers.ModelSerializer):
 
         parent = attrs.get('parent', getattr(self.instance, 'parent', None))
         chauffeur = attrs.get('chauffeur', getattr(self.instance, 'chauffeur', None))
-
 
         if not parent:
             # On cherche s'il existe déjà un contrat parent actif pour ce chauffeur
@@ -203,7 +200,8 @@ class ContratSerializer(serializers.ModelSerializer):
         avance_payee = validated_data.get('montant_paye', Decimal('0.00'))
 
         validated_data['montant_restant'] = max(Decimal('0.00'), montant_total - avance_payee)
-        validated_data['statut'] = Contrat.STATUT_SOLDE if validated_data['montant_restant'] == 0 else Contrat.STATUT_ACTIF
+        validated_data['statut'] = Contrat.STATUT_SOLDE if validated_data[
+                                                               'montant_restant'] == 0 else Contrat.STATUT_ACTIF
 
         with transaction.atomic():
             parent_contrat = super().create(validated_data)
@@ -221,13 +219,13 @@ class ContratSerializer(serializers.ModelSerializer):
                 sc_total = sc_instance_data.get('montant_total', Decimal('0.00'))
                 sc_avance = sc_instance_data.get('montant_paye', Decimal('0.00'))
                 sc_instance_data['montant_restant'] = max(Decimal('0.00'), sc_total - sc_avance)
-                sc_instance_data['statut'] = Contrat.STATUT_SOLDE if sc_instance_data['montant_restant'] == 0 else Contrat.STATUT_ACTIF
+                sc_instance_data['statut'] = Contrat.STATUT_SOLDE if sc_instance_data[
+                                                                         'montant_restant'] == 0 else Contrat.STATUT_ACTIF
                 Contrat.objects.create(**sc_instance_data)
 
         return parent_contrat
 
     def update(self, instance, validated_data):
-        validated_data.pop('prochaine_echeance', None)
 
         if instance.parent is not None:
             validated_data.pop('immatriculation', None)
@@ -237,11 +235,16 @@ class ContratSerializer(serializers.ModelSerializer):
         if chauffeur:
             validated_data['nom_complet'] = chauffeur.nom_complet
 
+        # 🚀 LOGIQUE FINANCIÈRE SÉCURISÉE (Mise à jour)
+        new_total = validated_data.get('montant_total', instance.montant_total)
+        new_paye = validated_data.get('montant_paye', instance.montant_paye)
 
-        new_total = validated_data.get('montant_total')
-        if new_total is not None and new_total != instance.montant_total:
-            deja_paye = instance.montant_paye
-            validated_data['montant_restant'] = max(0, new_total - deja_paye)
+        if new_total != instance.montant_total or new_paye != instance.montant_paye:
+            validated_data['montant_restant'] = max(Decimal('0.00'), new_total - new_paye)
+
+            # Auto-solde si le montant restant tombe à 0
+            if validated_data['montant_restant'] == 0:
+                validated_data['statut'] = Contrat.STATUT_SOLDE
 
         return super().update(instance, validated_data)
 
