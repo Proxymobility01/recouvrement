@@ -227,9 +227,6 @@ class ContratSerializer(serializers.ModelSerializer):
 
     def update(self, instance, validated_data):
 
-        if instance.parent is not None:
-            validated_data.pop('immatriculation', None)
-            validated_data.pop('vin', None)
 
         chauffeur = validated_data.get('chauffeur')
         if chauffeur:
