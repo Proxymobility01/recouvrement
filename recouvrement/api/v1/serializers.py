@@ -1,4 +1,6 @@
 import re
+from collections import defaultdict
+
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
@@ -335,10 +337,12 @@ class InitiationPaiementSerializer(serializers.Serializer):
     def validate(self, attrs):
         lignes = attrs.get('lignes', [])
 
+        # 1. Anti-Doublons
         lease_ids = [ligne['lease_id'].id for ligne in lignes]
         if len(lease_ids) != len(set(lease_ids)):
-            raise serializers.ValidationError({"lignes": "Doublons détectés."})
+            raise serializers.ValidationError({"lignes": "Doublons détectés dans les échéances."})
 
+        # 2. Vérification de l'intégrité de la famille (Même Véhicule / Contrat parent)
         root_parent_ids = set()
         for ligne in lignes:
             contrat = ligne['lease_id'].contrat
@@ -346,20 +350,48 @@ class InitiationPaiementSerializer(serializers.Serializer):
             root_parent_ids.add(root_id)
 
         if len(root_parent_ids) > 1:
-            raise serializers.ValidationError({"lignes": "Mélange de contrats racines interdit."})
+            raise serializers.ValidationError(
+                {"lignes": "Mélange de contrats appartenant à des véhicules différents interdit."})
 
+        # 3. 🚀 LE NOUVEAU VERROU INTELLIGENT (Par contrat)
         if lignes:
-            root_parent_id = list(root_parent_ids)[0]
             LeaseModel = lignes[0]['lease_id'].__class__
-            derniere_date_panier = max(ligne['lease_id'].date_echeance for ligne in lignes)
 
-            arrieres_impayes = LeaseModel.objects.filter(
-                Q(contrat_id=root_parent_id) | Q(contrat__parent_id=root_parent_id),
-                date_echeance__lt=derniere_date_panier
-            ).exclude(statut=LeaseModel.STATUT_PAYE).exclude(id__in=lease_ids)
+            # A. On regroupe les leases du panier par contrat_id
+            leases_par_contrat = defaultdict(list)
+            for ligne in lignes:
+                lease = ligne['lease_id']
+                leases_par_contrat[lease.contrat_id].append(lease)
 
-            if arrieres_impayes.exists():
-                raise serializers.ValidationError({"lignes": "Des arriérés plus anciens bloquent ce paiement."})
+            erreurs = []
+
+            # B. On vérifie l'historique de CHAQUE contrat indépendamment
+            for contrat_id, leases_du_contrat in leases_par_contrat.items():
+
+                # Date la plus lointaine qu'il essaie de payer pour CE contrat
+                derniere_date = max(lease.date_echeance for lease in leases_du_contrat)
+
+                # Récupération de la référence du contrat pour le message d'erreur
+                reference_contrat = leases_du_contrat[0].contrat.reference
+
+                # Y a-t-il un trou chronologique pour CE contrat précis ?
+                arrieres_bloquants = LeaseModel.objects.filter(
+                    contrat_id=contrat_id,
+                    date_echeance__lt=derniere_date
+                ).exclude(
+                    statut=LeaseModel.STATUT_PAYE
+                ).exclude(
+                    id__in=lease_ids  # On pardonne s'il paie cet arriéré dans le même panier
+                )
+
+                if arrieres_bloquants.exists():
+                    erreurs.append(f"Il existe des impayés pour le contrat {reference_contrat}.")
+
+            # C. S'il y a des erreurs sur un ou plusieurs contrats, on bloque tout
+            if erreurs:
+                raise serializers.ValidationError({
+                    "lignes": " | ".join(erreurs)
+                })
 
         return attrs
 
