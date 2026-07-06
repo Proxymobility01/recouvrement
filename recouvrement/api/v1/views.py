@@ -620,7 +620,7 @@ class PaiementViewSet(TenantModelViewSet):
     permission_classes = [IsAuthenticated, StrictDjangoModelPermissions]
     pagination_class = StandardResultsSetPagination
     filter_backends = [DjangoFilterBackend, filters.OrderingFilter, filters.SearchFilter]
-    filter_class = PaiementFilter
+    filterset_class = PaiementFilter
     search_fields = ['reference', 'nom_complet_search', '^session__telephone',]
     ordering_fields = ['date_paiement', 'created_at']
     ordering = ['-date_paiement']
