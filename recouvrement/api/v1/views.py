@@ -654,7 +654,6 @@ class PaiementViewSet(TenantModelViewSet):
         return Response({
             "message": "Création réussie.",
             "id": serializer.instance.id,
-            "reference": serializer.instance.reference
         }, status=status.HTTP_201_CREATED)
 
     def perform_destroy(self, instance):
