@@ -1,6 +1,9 @@
+import datetime
+
 from django.contrib import admin
+from django.utils import timezone
 from django.utils.html import format_html
-from rangefilter.filters import DateRangeFilter
+from rangefilter.filters import DateRangeFilter, DateRangeQuickSelectListFilter
 from .models import (
     TypeContrat,
     Contrat,
@@ -28,6 +31,30 @@ class Transaction(SessionPaiement):
         verbose_name_plural = "Transactions"
 
 
+class DateRangeAvecHierFilter(DateRangeQuickSelectListFilter, DateRangeFilter):
+    """
+    On conserve le DateRangeFilter (sélecteur de plage personnalisée « du / au »)
+    et on lui ajoute des liens rapides : Toutes les dates, Aujourd'hui, Hier,
+    Les 7 derniers jours, Ce mois-ci, Cette année.
+    (DateRangeQuickSelectListFilter hérite déjà de DateRangeFilter : la plage reste intacte.)
+    """
+
+    def __init__(self, field, request, params, model, model_admin, field_path):
+        super().__init__(field, request, params, model, model_admin, field_path)
+
+        now = timezone.now()
+        if timezone.is_aware(now):
+            now = timezone.localtime(now)
+        hier = (now - datetime.timedelta(days=1)).date()
+
+        links = list(self.links)
+        links.insert(2, ('Hier', {
+            self.lookup_kwarg_gte: hier,
+            self.lookup_kwarg_lte: hier,
+        }))
+        self.links = tuple(links)
+
+
 # ==========================================
 # 2. CONFIGURATION DES ADMINS
 # ==========================================
@@ -46,8 +73,8 @@ class ContratAdmin(admin.ModelAdmin):
     list_display = ('id_reference', 'nom_complet', 'type_contrat', 'statut', 'montant_total', 'montant_restant',
                     'date_debut', 'date_fin', 'prochaine_echeance', 'created_at', 'compte_id')
     list_filter = (
-        ('created_at', DateRangeFilter),
-        ('prochaine_echeance', DateRangeFilter),
+        ('created_at', DateRangeAvecHierFilter),
+        ('prochaine_echeance', DateRangeAvecHierFilter),
         'statut', 'frequence', 'type_contrat', 'compte_id', 'regle_penalite',
     )
     search_fields = ('reference', 'nom_complet', 'immatriculation', 'vin', 'chauffeur__email')
@@ -94,8 +121,8 @@ class TransactionAdmin(admin.ModelAdmin):
     """
     list_display = ('reference', 'montant_total', 'statut', 'telephone', 'date_validation', 'created_at', 'compte_id')
     list_filter = (
-        ('created_at', DateRangeFilter),
-        ('date_validation', DateRangeFilter),
+        ('created_at', DateRangeAvecHierFilter),
+        ('date_validation', DateRangeAvecHierFilter),
         'statut', 'compte_id',
     )
     search_fields = ('reference', 'gateway_reference', 'telephone', 'utilisateur__email')
@@ -111,8 +138,8 @@ class TransactionAdmin(admin.ModelAdmin):
 class LeaseAdmin(admin.ModelAdmin):
     list_display = ('contrat', 'date_echeance', 'created_at', 'montant_attendu', 'montant_paye', 'statut', 'id_compte')
     list_filter = (
-        ('created_at', DateRangeFilter),
-        ('date_echeance', DateRangeFilter),
+        ('created_at', DateRangeAvecHierFilter),
+        ('date_echeance', DateRangeAvecHierFilter),
         'statut', 'compte_id',
     )
     search_fields = ('contrat__reference', 'nom_complet', 'nom_complet_search')
@@ -135,8 +162,8 @@ class PaiementAdmin(admin.ModelAdmin):
     # Évite le N+1 queries : chaque colonne ci-dessus appelle le __str__ d'une FK différente
     list_select_related = ('contrat', 'lease', 'enregistre_par', 'session')
     list_filter = (
-        ('created_at', DateRangeFilter),
-        ('date_paiement', DateRangeFilter),
+        ('created_at', DateRangeAvecHierFilter),
+        ('date_paiement', DateRangeAvecHierFilter),
         'statut', 'methode', 'est_annule', 'compte_id',
     )
     search_fields = ('nom_complet', 'session__reference')
