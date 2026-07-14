@@ -1,4 +1,6 @@
 from django.contrib import admin
+from django.utils.html import format_html
+from rangefilter.filters import DateRangeFilter
 from .models import (
     TypeContrat,
     Contrat,
@@ -41,10 +43,15 @@ class TypeContratAdmin(admin.ModelAdmin):
 
 @admin.register(Contrat)
 class ContratAdmin(admin.ModelAdmin):
-    list_display = ('reference', 'nom_complet', 'type_contrat', 'statut', 'montant_total', 'montant_restant',
-                    'compte_id')
-    list_filter = ('statut', 'frequence', 'type_contrat', 'compte_id', 'regle_penalite')
+    list_display = ('id_reference', 'nom_complet', 'type_contrat', 'statut', 'montant_total', 'montant_restant',
+                    'date_debut', 'date_fin', 'prochaine_echeance', 'created_at', 'compte_id')
+    list_filter = (
+        ('created_at', DateRangeFilter),
+        ('prochaine_echeance', DateRangeFilter),
+        'statut', 'frequence', 'type_contrat', 'compte_id', 'regle_penalite',
+    )
     search_fields = ('reference', 'nom_complet', 'immatriculation', 'vin', 'chauffeur__email')
+    date_hierarchy = 'created_at'
 
     # 🚀 raw_id_fields : Indispensable pour ne pas faire crasher la page s'il y a 10 000 chauffeurs
     raw_id_fields = ('chauffeur', 'enregistre_par', 'parent', 'regle_penalite')
@@ -52,6 +59,13 @@ class ContratAdmin(admin.ModelAdmin):
     # On bloque la modification manuelle des champs générés/calculés
     readonly_fields = ('reference', 'nom_complet_search', 'montant_paye', 'created_at', 'updated_at')
     ordering = ('-created_at',)
+
+    def id_reference(self, obj):
+        """Colonne combinée : ID en gras, référence en dessous en plus discret."""
+        return format_html('<strong>#{}</strong><br><span style="color:#888;">{}</span>', obj.id, obj.reference)
+
+    id_reference.short_description = 'ID / Référence'
+    id_reference.admin_order_field = 'id'
 
     fieldsets = (
         ('Informations Générales', {
@@ -78,8 +92,12 @@ class TransactionAdmin(admin.ModelAdmin):
     """
     C'est ici qu'on gère l'affichage de SessionPaiement sous le nom "Transaction".
     """
-    list_display = ('reference', 'montant_total', 'statut', 'telephone', 'date_validation', 'compte_id')
-    list_filter = ('statut', 'compte_id', 'date_validation')
+    list_display = ('reference', 'montant_total', 'statut', 'telephone', 'date_validation', 'created_at', 'compte_id')
+    list_filter = (
+        ('created_at', DateRangeFilter),
+        ('date_validation', DateRangeFilter),
+        'statut', 'compte_id',
+    )
     search_fields = ('reference', 'gateway_reference', 'telephone', 'utilisateur__email')
     raw_id_fields = ('utilisateur',)
 
@@ -91,18 +109,36 @@ class TransactionAdmin(admin.ModelAdmin):
 
 @admin.register(Lease)
 class LeaseAdmin(admin.ModelAdmin):
-    list_display = ('contrat', 'date_echeance', 'montant_attendu', 'montant_paye', 'statut', 'compte_id')
-    list_filter = ('statut', 'compte_id', 'date_echeance')
+    list_display = ('contrat', 'date_echeance', 'created_at', 'montant_attendu', 'montant_paye', 'statut', 'id_compte')
+    list_filter = (
+        ('created_at', DateRangeFilter),
+        ('date_echeance', DateRangeFilter),
+        'statut', 'compte_id',
+    )
     search_fields = ('contrat__reference', 'nom_complet', 'nom_complet_search')
     raw_id_fields = ('contrat',)
     readonly_fields = ('nom_complet', 'nom_complet_search', 'created_at', 'updated_at')
     ordering = ('-date_echeance',)
 
+    def id_compte(self, obj):
+        """Colonne combinée : ID du lease en gras, compte_id (tenant) en dessous."""
+        return format_html('<strong>#{}</strong><br><span style="color:#888;">Compte {}</span>', obj.id, obj.compte_id)
+
+    id_compte.short_description = 'ID / Compte'
+    id_compte.admin_order_field = 'id'
+
 
 @admin.register(Paiement)
 class PaiementAdmin(admin.ModelAdmin):
-    list_display = ('montant', 'methode', 'statut', 'date_paiement', 'compte_id')
-    list_filter = ('statut', 'methode', 'est_annule', 'compte_id')
+    list_display = ('contrat', 'lease', 'enregistre_par','nom_complet', 'session', 'methode', 'statut', 'date_paiement',
+                    'created_at')
+    # Évite le N+1 queries : chaque colonne ci-dessus appelle le __str__ d'une FK différente
+    list_select_related = ('contrat', 'lease', 'enregistre_par', 'session')
+    list_filter = (
+        ('created_at', DateRangeFilter),
+        ('date_paiement', DateRangeFilter),
+        'statut', 'methode', 'est_annule', 'compte_id',
+    )
     search_fields = ('nom_complet', 'session__reference')
     raw_id_fields = ('contrat', 'lease', 'enregistre_par', 'session')
     readonly_fields = ('nom_complet', 'nom_complet_search', 'created_at', 'updated_at')

@@ -5,11 +5,10 @@ import json
 import logging
 from collections import defaultdict
 from decimal import Decimal
-
 from django_q.tasks import async_task
 from django.utils.dateparse import parse_datetime
 from django.db import transaction, DatabaseError, IntegrityError
-from django.db.models import Q
+from django.db.models import Q, Prefetch
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import filters, status
@@ -120,12 +119,13 @@ class ContratViewSet(TenantModelViewSet):
     @action(detail=False, methods=['get'], url_path='impayes-du-jour')
     def impayes_du_jour(self, request):
         """
-        Retourne TOUS les contrats parents (véhicules) ayant un impayé aujourd'hui,
-        que ce soit sur le contrat lui-même ou sur l'un de ses sous-contrats.
-        Bypass la pagination pour un traitement de masse par le Front-End.
+        Retourne TOUS les contrats parents ayant un impayé aujourd'hui,
+        incluant la liste de leurs sous-contrats et le type de chaque contrat.
+        Vue transverse réservée au superuser (tous les comptes confondus).
         """
         aujourdhui = timezone.now().date()
         user = request.user
+
         if not user.is_superuser:
             raise CustomAPIException(
                 resp_code=ErrorCodes.FORBIDDEN,
@@ -133,22 +133,62 @@ class ContratViewSet(TenantModelViewSet):
                 dev_message="L'utilisateur n'est pas superuser."
             )
 
-        contrats_impayes = Contrat.objects.filter(
-            compte_id=user.compte_id,
+        # 1. ÉTAPE BOTTOM-UP : Cibler les baux non payés ou partiellement payés
+        statuts_impayes = [Lease.STATUT_NON_PAYE, Lease.STATUT_PARTIEL]
+
+        leases_impayes = Lease.objects.filter(
+            date_echeance=aujourdhui,
+            statut__in=statuts_impayes
+        )
+
+        # On utilise un `set` pour obtenir une recherche ultra-rapide en mémoire (O(1))
+        contrat_ids_avec_impayes = set(leases_impayes.values_list('contrat_id', flat=True))
+
+        # Si personne n'a d'impayé aujourd'hui, on gagne du temps et on s'arrête là
+        if not contrat_ids_avec_impayes:
+            return Response({"total": 0, "vehicules": []}, status=status.HTTP_200_OK)
+
+        # 2. RÉCUPÉRATION OPTIMISÉE (Évite le N+1 Queries)
+        contrats_parents = Contrat.objects.filter(
             parent__isnull=True,
             statut=Contrat.STATUT_ACTIF
         ).filter(
-            (Q(leases__date_echeance=aujourdhui) & ~Q(leases__statut=Lease.STATUT_PAYE)) |
-            (Q(sous_contrats__leases__date_echeance=aujourdhui) & ~Q(sous_contrats__leases__statut=Lease.STATUT_PAYE))
+            Q(id__in=contrat_ids_avec_impayes) |
+            Q(sous_contrats__id__in=contrat_ids_avec_impayes)
+        ).select_related(
+            'chauffeur', 'type_contrat'  # Jointure SQL directe pour le parent
+        ).prefetch_related(
+            Prefetch(
+                'sous_contrats',
+                queryset=Contrat.objects.filter(statut=Contrat.STATUT_ACTIF).select_related('type_contrat')
+            )
         ).distinct()
 
-        resultats = list(contrats_impayes.values(
-            'id',
-            'reference',
-            'vin',
-            'immatriculation',
-            'chauffeur__nom_complet'
-        ))
+        # 3. CONSTRUCTION DU JSON POUR LE FRONT-END
+        resultats = []
+
+        for parent in contrats_parents:
+
+            # On prépare la liste des accessoires (sous-contrats)
+            sous_contrats_data = []
+            for sc in parent.sous_contrats.all():
+                sous_contrats_data.append({
+                    "id": sc.id,
+                    "reference": sc.reference,
+                    "type_contrat": sc.type_contrat.libelle if sc.type_contrat else "Non défini",
+                })
+
+            # On compile les données du véhicule (parent)
+            resultats.append({
+                "id": parent.id,
+                "reference": parent.reference,
+                "compte_id": parent.compte_id,
+                "vin": parent.vin,
+                "immatriculation": parent.immatriculation,
+                "chauffeur__nom_complet": parent.chauffeur.nom_complet if parent.chauffeur else parent.nom_complet,
+                "type_contrat": parent.type_contrat.libelle if parent.type_contrat else "Non défini",
+                "sous_contrats": sous_contrats_data
+            })
 
         return Response({
             "total": len(resultats),
