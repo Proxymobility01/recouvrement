@@ -87,7 +87,7 @@ class TypeContratAdmin(admin.ModelAdmin):
 
 @admin.register(Contrat)
 class ContratAdmin(admin.ModelAdmin):
-    list_display = ('id_reference', 'nom_complet', 'type_contrat', 'statut', 'montant_total', 'montant_restant',
+    list_display = ('id_reference', 'nom_complet', 'type_contrat', 'statut', 'montant_total','montant_paye', 'montant_restant',
                     'date_debut', 'date_fin', 'prochaine_echeance', 'created_at', 'compte_id')
     list_filter = (
         ('created_at', DateRangeAvecHierFilter),
@@ -101,7 +101,7 @@ class ContratAdmin(admin.ModelAdmin):
     raw_id_fields = ('chauffeur', 'enregistre_par', 'parent', 'regle_penalite')
 
     # On bloque la modification manuelle des champs générés/calculés
-    readonly_fields = ('reference', 'nom_complet_search', 'montant_paye', 'created_at', 'updated_at')
+    readonly_fields = ('reference', 'nom_complet_search', 'created_at', 'updated_at')
     ordering = ('-created_at',)
 
     def id_reference(self, obj):

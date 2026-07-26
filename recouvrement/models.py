@@ -130,7 +130,7 @@ class Contrat(BaseModel):
     montant_total = models.DecimalField(max_digits=12, decimal_places=2)
     montant_restant = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     montant_par_paiement = models.DecimalField(max_digits=12, decimal_places=2)
-    montant_paye = models.DecimalField(max_digits=12,decimal_places=2,default=0,editable=False)
+    montant_paye = models.DecimalField(max_digits=12,decimal_places=2,default=0)
 
     frequence = models.CharField(max_length=50,choices=FREQUENCE_CHOICES, default=JOURNALIER)
     date_debut = models.DateField()
