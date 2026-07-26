@@ -313,11 +313,13 @@ class Lease(BaseModel):
     STATUT_NON_PAYE = 'NON_PAYE'
     STATUT_PARTIEL = 'PARTIEL'
     STATUT_PAYE = 'PAYE'
+    STATUT_ANNULE = 'ANNULE'
 
     STATUT_CHOICES = [
         (STATUT_NON_PAYE, 'Non payé'),
         (STATUT_PARTIEL, 'Partiellement payé'),
         (STATUT_PAYE, 'Payé'),
+        (STATUT_ANNULE, 'Annulé (Absence/Panne)'),
     ]
 
     contrat = models.ForeignKey(

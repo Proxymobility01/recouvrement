@@ -1,9 +1,13 @@
 import datetime
 
-from django.contrib import admin
+from django import forms
+from django.contrib import admin, messages
+from django.contrib.admin.helpers import ACTION_CHECKBOX_NAME
+from django.shortcuts import render
 from django.utils import timezone
 from django.utils.html import format_html
 from rangefilter.filters import DateRangeFilter, DateRangeQuickSelectListFilter
+from .services import annuler_leases_et_prolonger, AnnulationLeaseError
 from .models import (
     TypeContrat,
     Contrat,
@@ -53,6 +57,19 @@ class DateRangeAvecHierFilter(DateRangeQuickSelectListFilter, DateRangeFilter):
             self.lookup_kwarg_lte: hier,
         }))
         self.links = tuple(links)
+
+
+class AnnulerLeasesForm(forms.Form):
+    """Formulaire de la page intermédiaire de l'action « Annuler les échéances »."""
+
+    jours_a_prolonger = forms.IntegerField(
+        label="Nombre de jours à prolonger",
+        min_value=0,
+        initial=0,
+        help_text="Jours OUVRÉS ajoutés à la date de fin du contrat. "
+                  "Les jours de repos configurés pour l'entreprise sont automatiquement sautés. "
+                  "Mettre 0 pour annuler sans prolonger."
+    )
 
 
 # ==========================================
@@ -153,6 +170,53 @@ class LeaseAdmin(admin.ModelAdmin):
 
     id_compte.short_description = 'ID / Compte'
     id_compte.admin_order_field = 'id'
+
+    actions = ['annuler_et_prolonger']
+
+    @admin.action(description="Annuler les échéances et prolonger le contrat")
+    def annuler_et_prolonger(self, request, queryset):
+        """
+        Action de masse : annule les échéances sélectionnées et prolonge la date de fin
+        des contrats concernés. Passe par une page intermédiaire pour saisir le nombre
+        de jours, comme le fait la suppression groupée de Django.
+        """
+        # 2e passage : l'utilisateur a validé la page intermédiaire
+        if 'appliquer' in request.POST:
+            form = AnnulerLeasesForm(request.POST)
+
+            if form.is_valid():
+                jours = form.cleaned_data['jours_a_prolonger']
+                try:
+                    resultat = annuler_leases_et_prolonger(queryset, jours)
+                except AnnulationLeaseError as e:
+                    self.message_user(request, str(e), level=messages.ERROR)
+                    return None
+
+                message = (
+                    f"{resultat['nb_leases']} échéance(s) annulée(s) "
+                    f"sur {resultat['nb_contrats']} contrat(s)."
+                )
+                if resultat['contrats_impactes']:
+                    message += (
+                        f" Prolongation de {jours} jour(s) ouvré(s) appliquée à : "
+                        f"{', '.join(resultat['contrats_impactes'])}."
+                    )
+                self.message_user(request, message, level=messages.SUCCESS)
+                return None  # retour à la liste
+
+        # 1er passage : on affiche la page de confirmation
+        else:
+            form = AnnulerLeasesForm()
+
+        return render(request, 'admin/recouvrement/annuler_leases.html', {
+            **self.admin_site.each_context(request),
+            'title': "Annuler les échéances et prolonger le contrat",
+            'leases': queryset.select_related('contrat'),
+            'form': form,
+            'action_checkbox_name': ACTION_CHECKBOX_NAME,
+            'selection': queryset.values_list('pk', flat=True),
+            'opts': self.model._meta,
+        })
 
 
 @admin.register(Paiement)

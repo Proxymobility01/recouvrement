@@ -4,6 +4,7 @@ import hmac
 import json
 import logging
 from collections import defaultdict
+from datetime import timedelta
 from decimal import Decimal
 from django_q.tasks import async_task
 from django.utils.dateparse import parse_datetime
@@ -28,9 +29,9 @@ from core.exceptions import CustomAPIException
 from core.errors import ErrorCodes
 from .serializers import ContratSerializer, LeaseSerializer, InitiationPaiementSerializer, PaiementSerializer, \
     CalendrierSerializer, TypeContratSerializer, SousContratSerializer, ParametreSerializer, ReglePenaliteSerializer, \
-    PenaliteSerializer, SessionPaiementSerializer, AssignerRegleSerializer
+    PenaliteSerializer, SessionPaiementSerializer, AssignerRegleSerializer, AnnulerLeasesSerializer
 from ...models import Contrat, Paiement, Lease, SessionPaiement, TypeContrat, Parametre, ReglePenalite, Penalite
-from ...services import PaymentService
+from ...services import PaymentService, annuler_leases_et_prolonger, AnnulationLeaseError
 from core.tasks import _schedule_next_verification
 
 logger = logging.getLogger(__name__)
@@ -252,6 +253,45 @@ class ContratViewSet(TenantModelViewSet):
             "reference": sous_contrat.reference,
             "parent_id": parent_contrat.id
         }, status=status.HTTP_201_CREATED)
+
+    @action(detail=False, methods=['post'], url_path='annuler-leases')
+    def annuler_leases(self, request):
+        serializer = AnnulerLeasesSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        # 🚀 On déduplique dès l'entrée : sinon un même id envoyé 3 fois serait compté 3 fois
+        lease_ids = set(serializer.validated_data['lease_ids'])
+        jours_a_prolonger = serializer.validated_data['jours_a_prolonger']
+
+        # 1. Récupération et vérification (Sécurité Multi-Tenant ajoutée)
+        leases_a_annuler = Lease.objects.filter(
+            id__in=lease_ids,
+            contrat__in=self.get_queryset()
+        ).select_related('contrat')
+
+        if leases_a_annuler.count() != len(lease_ids):
+            raise CustomAPIException(
+                resp_code=ErrorCodes.BAD_REQUEST,
+                status_code=400,
+                dev_message="Certains identifiants de lease sont introuvables ou n'appartiennent pas à votre entreprise."
+            )
+
+        # 2. Logique métier partagée avec l'action de l'admin Django
+        try:
+            resultat = annuler_leases_et_prolonger(leases_a_annuler, jours_a_prolonger)
+        except AnnulationLeaseError as e:
+            raise CustomAPIException(
+                resp_code=ErrorCodes.FORBIDDEN,
+                status_code=403,
+                dev_message=str(e)
+            )
+
+        return Response({
+            "message": f"{resultat['nb_leases']} échéance(s) annulée(s) avec succès "
+                       f"sur {resultat['nb_contrats']} contrat(s).",
+            "jours_prolonges": jours_a_prolonger,
+            "contrats_impactes": resultat['contrats_impactes']
+        }, status=status.HTTP_200_OK)
 
 
 class LeaseViewSet(TenantModelViewSet):

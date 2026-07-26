@@ -1,0 +1,54 @@
+{% extends "admin/base_site.html" %}
+
+{% block breadcrumbs %}
+  <div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">Accueil</a>
+    &rsaquo; <a href="{% url 'admin:app_list' app_label=opts.app_label %}">{{ opts.app_config.verbose_name }}</a>
+    &rsaquo; <a href="{% url 'admin:recouvrement_lease_changelist' %}">{{ opts.verbose_name_plural|capfirst }}</a>
+    &rsaquo; Annulation
+  </div>
+{% endblock %}
+
+{% block content %}
+  <p>
+    Vous êtes sur le point d'annuler les <strong>{{ leases|length }}</strong> échéance(s) ci-dessous.
+    Seules les échéances au statut <em>Non payé</em> peuvent être annulées.
+  </p>
+
+  <ul>
+    {% for lease in leases %}
+      <li>
+        <strong>#{{ lease.id }}</strong> &mdash; {{ lease.contrat }} &mdash;
+        échéance du {{ lease.date_echeance }} &mdash;
+        {{ lease.montant_attendu }} &mdash; {{ lease.get_statut_display }}
+      </li>
+    {% endfor %}
+  </ul>
+
+  <form method="post">
+    {% csrf_token %}
+
+    {% for pk in selection %}
+      <input type="hidden" name="{{ action_checkbox_name }}" value="{{ pk }}">
+    {% endfor %}
+    <input type="hidden" name="action" value="annuler_et_prolonger">
+
+    <fieldset class="module aligned">
+      {% for field in form %}
+        <div class="form-row">
+          {{ field.errors }}
+          {{ field.label_tag }}
+          {{ field }}
+          {% if field.help_text %}
+            <div class="help">{{ field.help_text }}</div>
+          {% endif %}
+        </div>
+      {% endfor %}
+    </fieldset>
+
+    <div class="submit-row">
+      <input type="submit" name="appliquer" value="Confirmer l'annulation" class="default">
+      <a href="{% url 'admin:recouvrement_lease_changelist' %}" class="button cancel-link">Annuler</a>
+    </div>
+  </form>
+{% endblock %}

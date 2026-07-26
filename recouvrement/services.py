@@ -1,7 +1,10 @@
 import logging
+from collections import defaultdict
+from datetime import timedelta
 
 import requests
 from django.core.cache import cache
+from django.db import transaction
 
 from accounts.models import ConfigPaiement
 from core.errors import ErrorCodes
@@ -9,6 +12,99 @@ from core.exceptions import CustomAPIException
 from core.utils import format_phone_cm
 
 logger = logging.getLogger(__name__)
+
+
+class AnnulationLeaseError(Exception):
+    """Échéance non annulable (déjà payée, partiellement payée ou déjà annulée)."""
+
+
+def annuler_leases_et_prolonger(leases, jours_a_prolonger):
+    """
+    Annule les échéances fournies et prolonge la date de fin de chaque contrat
+    concerné de `jours_a_prolonger` jours OUVRÉS (les jours de repos configurés
+    pour le compte propriétaire du contrat sont sautés).
+
+    `leases` : queryset d'échéances DÉJÀ filtré et autorisé par l'appelant
+               (l'API le restreint au tenant, l'admin au périmètre du staff).
+
+    Utilisé à la fois par l'API (ContratViewSet.annuler_leases) et par l'action
+    de l'admin, afin que les deux ne divergent jamais.
+
+    Lève AnnulationLeaseError si une échéance n'est pas au statut NON_PAYE.
+    """
+    from .models import Lease, Parametre, Penalite
+
+    if leases.exclude(statut=Lease.STATUT_NON_PAYE).exists():
+        raise AnnulationLeaseError(
+            "Impossible d'annuler : certaines échéances ont déjà un paiement ou sont déjà annulées."
+        )
+
+    # 1. Regroupement par contrat
+    leases_par_contrat = defaultdict(list)
+    for lease in leases.select_related('contrat'):
+        leases_par_contrat[lease.contrat].append(lease)
+
+    if not leases_par_contrat:
+        return {'nb_leases': 0, 'nb_contrats': 0, 'contrats_impactes': []}
+
+    # 2. Jours de repos PAR COMPTE.
+    # 🚀 Indispensable : un superadmin peut annuler des échéances de plusieurs
+    # entreprises à la fois. On ne peut donc pas se baser sur SON compte_id,
+    # il faut les jours de repos du compte propriétaire de chaque contrat.
+    comptes_concernes = {contrat.compte_id for contrat in leases_par_contrat}
+    jours_repos_par_compte = {
+        param.compte_id: param.jours_repos
+        for param in Parametre.objects.filter(compte_id__in=comptes_concernes)
+    }
+
+    nb_leases = sum(len(liste) for liste in leases_par_contrat.values())
+    contrats_impactes = []
+
+    # 3. Exécution atomique
+    with transaction.atomic():
+
+        # A. Nettoyage des pénalités non payées adossées à ces échéances
+        Penalite.objects.filter(
+            lease__in=leases,
+            statut=Penalite.STATUT_NON_PAYE
+        ).delete()
+
+        # B. Annulation de toutes les échéances d'un coup
+        leases.update(statut=Lease.STATUT_ANNULE)
+
+        # C. Prolongation intelligente de CHAQUE contrat
+        if jours_a_prolonger > 0:
+            for contrat in leases_par_contrat:
+                # Le JSON peut contenir des chaînes ("6") : on normalise en entiers,
+                # sinon la comparaison avec weekday() échouerait silencieusement.
+                jours_repos = {
+                    int(jour) for jour in (jours_repos_par_compte.get(contrat.compte_id) or [])
+                    if str(jour).lstrip('-').isdigit()
+                }
+
+                date_courante = contrat.date_fin
+
+                if len(jours_repos) >= 7:
+                    # Tous les jours sont déclarés en repos : on ne saute rien,
+                    # sinon la boucle ci-dessous ne se terminerait jamais.
+                    # (Même garde que dans la commande generer_leases.)
+                    date_courante += timedelta(days=jours_a_prolonger)
+                else:
+                    jours_ajoutes = 0
+                    while jours_ajoutes < jours_a_prolonger:
+                        date_courante += timedelta(days=1)
+                        if date_courante.weekday() not in jours_repos:
+                            jours_ajoutes += 1
+
+                contrat.date_fin = date_courante
+                contrat.save(update_fields=['date_fin', 'updated_at'])
+                contrats_impactes.append(contrat.reference)
+
+    return {
+        'nb_leases': nb_leases,
+        'nb_contrats': len(leases_par_contrat),
+        'contrats_impactes': contrats_impactes,
+    }
 
 
 class PaymentService:

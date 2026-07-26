@@ -1,8 +1,6 @@
 import re
 from collections import defaultdict
-
 from django.db import transaction
-from django.db.models import Q
 from django.utils import timezone
 from rest_framework import serializers
 from decimal import Decimal
@@ -657,3 +655,16 @@ class AssignerRegleSerializer(serializers.Serializer):
             )
 
         return ids_uniques
+
+
+class AnnulerLeasesSerializer(serializers.Serializer):
+    lease_ids = serializers.ListField(
+        child=serializers.IntegerField(),
+        allow_empty=False,
+        help_text="Liste des IDs des échéances à annuler."
+    )
+    jours_a_prolonger = serializers.IntegerField(
+        min_value=0,
+        default=0,
+        help_text="Nombre de jours ouvrés à ajouter à la date de fin du contrat."
+    )
