@@ -157,8 +157,11 @@ class LeaseAdmin(admin.ModelAdmin):
     list_filter = (
         ('created_at', DateRangeAvecHierFilter),
         ('date_echeance', DateRangeAvecHierFilter),
-        'statut', 'compte_id',
+        # Traversée de relation : Lease -> contrat -> type_contrat
+        'statut', 'contrat__type_contrat', 'compte_id',
     )
+    # Évite le N+1 : la colonne 'contrat' appelle le __str__ du contrat sur chaque ligne
+    list_select_related = ('contrat',)
     search_fields = ('contrat__reference', 'nom_complet', 'nom_complet_search')
     raw_id_fields = ('contrat',)
     readonly_fields = ('nom_complet', 'nom_complet_search', 'created_at', 'updated_at')
