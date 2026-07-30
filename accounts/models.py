@@ -140,7 +140,6 @@ class CustomUser(AbstractBaseUser, BaseModel):
             )
         return app_label in self._module_perm_cache
 
-
 # ==========================================
 # 3. TABLE D'AFFECTATION UTILISATEUR <-> ROLE
 # ==========================================

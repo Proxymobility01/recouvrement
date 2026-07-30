@@ -29,8 +29,10 @@ from core.exceptions import CustomAPIException
 from core.errors import ErrorCodes
 from .serializers import ContratSerializer, LeaseSerializer, InitiationPaiementSerializer, PaiementSerializer, \
     CalendrierSerializer, TypeContratSerializer, SousContratSerializer, ParametreSerializer, ReglePenaliteSerializer, \
-    PenaliteSerializer, SessionPaiementSerializer, AssignerRegleSerializer, AnnulerLeasesSerializer
-from ...models import Contrat, Paiement, Lease, SessionPaiement, TypeContrat, Parametre, ReglePenalite, Penalite
+    PenaliteSerializer, SessionPaiementSerializer, AssignerRegleSerializer, AnnulerLeasesSerializer, \
+    RegleGenerationLeaseSerializer
+from ...models import Contrat, Paiement, Lease, SessionPaiement, TypeContrat, Parametre, ReglePenalite, Penalite, \
+    RegleGenerationLease
 from ...services import PaymentService, annuler_leases_et_prolonger, AnnulationLeaseError
 from core.tasks import _schedule_next_verification
 
@@ -943,3 +945,54 @@ class SessionPaiementViewSet(TenantModelViewSet):
         if user.has_perm('recouvrement.view_all_sessionpaiements'):
             return qs
         return qs.filter(utilisateur=user)
+
+
+class RegleGenerationLeaseViewSet(TenantModelViewSet):
+    permission_classes = [IsAuthenticated, StrictDjangoModelPermissions]
+    queryset = RegleGenerationLease.objects.all()
+    serializer_class = RegleGenerationLeaseSerializer
+
+    filter_backends = [
+        DjangoFilterBackend,
+        filters.SearchFilter,
+        filters.OrderingFilter
+    ]
+
+    # Filtres exacts (utile pour filtrer les règles actives ou par type de fréquence)
+    filterset_fields = ['frequence', 'actif']
+
+    # Recherche textuelle optimisée via Trigram (PostgreSQL)
+    search_fields = ['nom_search']
+
+    # ↕️ Colonnes triables depuis le Front-End
+    ordering_fields = ['nom', 'frequence', 'debut', 'created_at']
+
+    # Tri par défaut : les règles les plus récemment créées en premier
+    ordering = ['-created_at']
+
+    @action(detail=True, methods=['post'], url_path='assigner-contrats')
+    def assigner_contrats(self, request, pk=None):
+        """
+        Applique cette règle de génération à une liste de contrats.
+        """
+        regle = self.get_object()
+
+        # Tu peux réutiliser le même Serializer que pour les pénalités
+        # s'il se contente de valider une liste d'IDs (contrat_ids)
+        serializer = AssignerRegleSerializer(
+            data=request.data,
+            context={'request': request}
+        )
+        serializer.is_valid(raise_exception=True)
+
+        contrat_ids = serializer.validated_data['contrat_ids']
+
+        # ✅ Mise à jour de masse hyper rapide
+        lignes_modifiees = Contrat.objects.filter(
+            id__in=contrat_ids,
+            compte_id=request.user.compte_id,
+        ).update(regle_generation=regle)
+
+        return Response({
+            "message": f"La règle '{regle.nom}' a été appliquée avec succès à {lignes_modifiees} contrat(s)."
+        }, status=status.HTTP_200_OK)

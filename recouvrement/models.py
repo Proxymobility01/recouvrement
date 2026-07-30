@@ -135,7 +135,7 @@ class Contrat(BaseModel):
     frequence = models.CharField(max_length=50,choices=FREQUENCE_CHOICES, default=JOURNALIER)
     date_debut = models.DateField()
     date_fin = models.DateField()
-    prochaine_echeance = models.DateField()
+    prochaine_echeance = models.DateTimeField()
 
     statut = models.CharField(max_length=20, choices=STATUT_CHOICES, default=STATUT_ACTIF)
 
@@ -147,6 +147,14 @@ class Contrat(BaseModel):
         related_name="contrats",
         verbose_name="Règle de pénalité appliquée",
         help_text="Associer une règle pour activer la planification automatique des pénalités de retard."
+    )
+
+    regle_generation = models.ForeignKey(
+        'RegleGenerationLease',
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name="contrats",
+        verbose_name="Règle de génération"
     )
 
     class Meta:
@@ -666,3 +674,80 @@ class Penalite(BaseModel):
             kwargs['update_fields'] = list(update_fields)
 
         super().save(*args, **kwargs)
+
+
+class RegleGenerationLease(BaseModel):
+    """
+    Catalogue des règles de génération de facturation.
+    Une règle peut être appliquée à une infinité de contrats.
+    """
+    nom = models.CharField(
+        max_length=100, unique=True,
+        help_text="Ex: 'Classique 24h', 'Demi-journée 12h/22h', 'Hebdomadaire'..."
+    )
+
+    nom_search = models.CharField(max_length=255, null=True, blank=True)
+
+    # --- Paramètres de Planification (Django-Q) ---
+    TYPE_CHOICES = [
+        (Schedule.ONCE, 'Une seule fois'),
+        (Schedule.HOURLY, 'Toutes les heures'),
+        (Schedule.DAILY, 'Tous les jours'),
+        (Schedule.WEEKLY, 'Toutes les semaines'),
+        (Schedule.MONTHLY, 'Tous les mois'),
+        (Schedule.CRON, 'Expression Cron (Avancé)'),
+    ]
+    frequence = models.CharField(
+        max_length=1,
+        choices=TYPE_CHOICES,
+        default=Schedule.DAILY,
+        verbose_name="Fréquence d'exécution"
+    )
+
+    cron_expression = models.CharField(
+        max_length=100,
+        blank=True, null=True,
+        help_text="Ex: '0 12,22 * * *' (Requis si Fréquence = Cron)."
+    )
+
+    # 🕒 Déclencheur initial (Crucial pour ONCE, HOURLY et DAILY)
+    debut = models.DateTimeField(
+        verbose_name="Date et heure de première exécution",
+        help_text="Détermine le moment exact (Date + Heure) où le cycle commencera."
+    )
+
+    actif = models.BooleanField(
+        default=True,
+        verbose_name="Règle active",
+        help_text="Si désactivé, AUCUN contrat lié à cette règle ne sera facturé."
+    )
+
+    class Meta:
+        db_table = "rc_regle_generation_lease"
+        verbose_name = "Règle de génération de leases"
+        verbose_name_plural = "Règles de génération de leases"
+        indexes = [
+            models.Index(fields=['frequence'], name='idx_regle_lease_freq'),
+            GinIndex(fields=['nom_search'], name='idx_lease_nom_search_trgm', opclasses=['gin_trgm_ops']),
+        ]
+
+    def __str__(self):
+        return f"{self.nom}"
+
+
+    def save(self, *args, **kwargs):
+        if self.nom:
+            self.nom_search = remove_accents(self.nom).lower()
+        else:
+            self.nom_search = ""
+        update_fields = kwargs.get('update_fields')
+        if update_fields is not None:
+            update_fields = set(update_fields)
+            if 'nom' in update_fields:
+                update_fields.add('nom_search')
+
+            kwargs['update_fields'] = list(update_fields)
+
+        super().save(*args, **kwargs)
+
+

@@ -10,8 +10,9 @@ from recouvrement.api.v1.views import (
     TypeContratViewSet,
     ParametreViewSet,
     ReglePenaliteViewSet,
-    PenaliteViewSet, SessionPaiementViewSet
+    PenaliteViewSet, SessionPaiementViewSet, RegleGenerationLeaseViewSet
 )
+
 
 router = DefaultRouter()
 
@@ -22,6 +23,7 @@ router.register(r'paiements', PaiementViewSet, basename='paiement')
 router.register(r'parametres', ParametreViewSet, basename='parametres')
 router.register(r'type-contrats', TypeContratViewSet, basename='type-contrats')
 router.register(r'regles-penalites', ReglePenaliteViewSet, basename='regle-penalite')
+router.register(r'regles-gereration-leases', RegleGenerationLeaseViewSet, basename='regles-gereration-leases')
 router.register(r'penalites', PenaliteViewSet, basename='penalite')
 router.register(r'transactions', SessionPaiementViewSet, basename='session-paiement')
 urlpatterns = [

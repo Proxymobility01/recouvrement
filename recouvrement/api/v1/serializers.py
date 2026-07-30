@@ -6,7 +6,7 @@ from rest_framework import serializers
 from decimal import Decimal
 from django_q.models import Schedule
 from recouvrement.models import Contrat, Lease, Paiement, TypeContrat, Parametre, ReglePenalite, Penalite, \
-    SessionPaiement
+    SessionPaiement, RegleGenerationLease
 
 
 class TypeContratSerializer(serializers.ModelSerializer):
@@ -683,3 +683,69 @@ class AnnulerLeasesSerializer(serializers.Serializer):
         default=0,
         help_text="Nombre de jours ouvrés à ajouter à la date de fin du contrat."
     )
+
+
+class RegleGenerationLeaseSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = RegleGenerationLease
+        fields = [
+            'id',
+            'nom',
+            'frequence',
+            'cron_expression',
+            'debut',
+            'actif',
+            'created_at',
+            'updated_at'
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def validate_nom(self, value):
+        """
+        Nettoie et valide le nom de la règle.
+        - Minimum 2 caractères.
+        - Uniquement lettres (avec accents), chiffres, espaces, tirets et underscores.
+        """
+        nom_nettoye = value.strip()
+
+        if len(nom_nettoye) < 2:
+            raise serializers.ValidationError("Le nom doit contenir au moins 2 caractères.")
+        if not re.match(r"^[\w\s\-\u00C0-\u024F]+$", nom_nettoye, re.UNICODE):
+            raise serializers.ValidationError(
+                "Utilisez uniquement des lettres, chiffres, espaces et tirets."
+            )
+
+        return nom_nettoye
+
+    def validate_cron_expression(self, value):
+        """
+        Valide que l'expression Cron correspond au format standard (5 parties).
+        Exemples valides : "* * * * *", "0 14,16 * * *", "*/15 * * * 1-5"
+        """
+        if value:
+            # Cette Regex vérifie qu'il y a exactement 5 blocs séparés par des espaces.
+            cron_regex = r'^(\*|[0-5]?\d)([\/\,\-][0-5]?\d)* (\*|[0-2]?\d)([\/\,\-][0-2]?\d)* (\*|[0-3]?\d)([\/\,\-][0-3]?\d)* (\*|[0-1]?\d)([\/\,\-][0-1]?\d)* (\*|[0-7])([\/\,\-][0-7])*$'
+
+            if not re.match(cron_regex, value.strip()):
+                raise serializers.ValidationError(
+                    "Format Cron invalide. L'expression doit contenir 5 parties (ex: '0 12,22 * * *')."
+                )
+        return value
+
+    def validate(self, data):
+        """
+        Validation croisée (Logique métier globale).
+        """
+        frequence = data.get('frequence', getattr(self.instance, 'frequence', None))
+        cron_expression = data.get('cron_expression', getattr(self.instance, 'cron_expression', None))
+
+        if frequence == Schedule.CRON:
+            if not cron_expression or cron_expression.strip() == "":
+                raise serializers.ValidationError({
+                    "cron_expression": "L'expression Cron est requise lorsque la fréquence est réglée sur 'Expression Cron'."
+                })
+        else:
+            # Si on change de fréquence (ex: on passe de CRON à DAILY), on vide l'expression Cron
+            data['cron_expression'] = None
+
+        return data
