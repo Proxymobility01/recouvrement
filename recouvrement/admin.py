@@ -76,6 +76,34 @@ class AnnulerLeasesForm(forms.Form):
     )
 
 
+class AssignerRegleGenerationContratsForm(forms.Form):
+    regle_generation = forms.ModelChoiceField(
+        label="Règle de génération de lease",
+        queryset=RegleGenerationLease.objects.none(),
+        help_text=(
+            "Seules les règles appartenant au compte des contrats "
+            "sélectionnés sont proposées. Une règle inactive peut être "
+            "attribuée, mais elle ne générera aucun lease tant qu'elle "
+            "restera inactive."
+        ),
+    )
+
+    def __init__(self, *args, compte_id=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        if compte_id is not None:
+            self.fields['regle_generation'].queryset = (
+                RegleGenerationLease.objects
+                .filter(compte_id=compte_id)
+                .order_by('-actif', 'nom')
+            )
+        self.fields['regle_generation'].label_from_instance = (
+            lambda regle: (
+                f"{regle.nom} — {regle.get_frequence_display()}"
+                f"{'' if regle.actif else ' (inactive)'}"
+            )
+        )
+
+
 class ContratAdminForm(forms.ModelForm):
     class Meta:
         model = Contrat
@@ -166,6 +194,7 @@ class TypeContratAdmin(admin.ModelAdmin):
 @admin.register(Contrat)
 class ContratAdmin(admin.ModelAdmin):
     form = ContratAdminForm
+    actions = ['assigner_regle_generation']
     list_display = (
         'id_reference',
         'nom_complet',
@@ -237,6 +266,71 @@ class ContratAdmin(admin.ModelAdmin):
             'fields': ('date_debut', 'date_fin', 'prochaine_echeance', 'created_at', 'updated_at')
         }),
     )
+
+    @admin.action(
+        description="Attribuer une règle de génération aux contrats sélectionnés"
+    )
+    def assigner_regle_generation(self, request, queryset):
+        compte_ids = list(
+            queryset
+            .order_by()
+            .values_list('compte_id', flat=True)
+            .distinct()[:2]
+        )
+
+        if len(compte_ids) != 1:
+            self.message_user(
+                request,
+                "Sélectionnez uniquement des contrats appartenant au même "
+                "compte avant d'attribuer une règle de génération.",
+                level=messages.ERROR,
+            )
+            return None
+
+        compte_id = compte_ids[0]
+
+        if 'appliquer' in request.POST:
+            form = AssignerRegleGenerationContratsForm(
+                request.POST,
+                compte_id=compte_id,
+            )
+            if form.is_valid():
+                regle = form.cleaned_data['regle_generation']
+                contrats_modifies = queryset.update(
+                    regle_generation=regle,
+                    updated_at=timezone.now(),
+                )
+                self.message_user(
+                    request,
+                    f"La règle « {regle.nom} » a été attribuée à "
+                    f"{contrats_modifies} contrat(s). La prochaine échéance "
+                    "de ces contrats n'a pas été modifiée.",
+                    level=messages.SUCCESS,
+                )
+                return None
+        else:
+            form = AssignerRegleGenerationContratsForm(
+                compte_id=compte_id,
+            )
+
+        return render(
+            request,
+            'admin/recouvrement/assigner_regle_generation.html',
+            {
+                **self.admin_site.each_context(request),
+                'title': (
+                    "Attribuer une règle de génération de lease aux contrats"
+                ),
+                'contrats': queryset.select_related(
+                    'type_contrat',
+                    'regle_generation',
+                ),
+                'form': form,
+                'action_checkbox_name': ACTION_CHECKBOX_NAME,
+                'selection': queryset.values_list('pk', flat=True),
+                'opts': self.model._meta,
+            },
+        )
 
 
 @admin.register(Transaction)

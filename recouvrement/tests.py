@@ -5,8 +5,9 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.contrib import admin
+from django.contrib.admin.helpers import ACTION_CHECKBOX_NAME
 from django.core.management import call_command
-from django.test import SimpleTestCase, TestCase
+from django.test import RequestFactory, SimpleTestCase, TestCase
 from django.utils import timezone
 from django_q.models import Schedule
 
@@ -16,6 +17,7 @@ from core.tasks import (
     paiement_task,
 )
 from recouvrement.admin import (
+    AssignerRegleGenerationContratsForm,
     ContratAdminForm,
     RegleGenerationLeaseAdminForm,
 )
@@ -112,6 +114,35 @@ class AdministrationGenerationLeaseTests(TestCase):
         self.assertIn(
             'même compte',
             formulaire.errors['regle_generation'][0],
+        )
+
+    def test_action_ne_propose_que_les_regles_du_compte_selectionne(self):
+        regle_compte = RegleGenerationLease.objects.create(
+            compte_id=77,
+            nom='Règle du compte sélectionné',
+            frequence=Schedule.DAILY,
+            debut=occurrence_aware(2026, 7, 30, 12),
+            actif=True,
+        )
+        RegleGenerationLease.objects.create(
+            compte_id=88,
+            nom='Règle autre compte',
+            frequence=Schedule.DAILY,
+            debut=occurrence_aware(2026, 7, 30, 12),
+            actif=True,
+        )
+
+        formulaire = AssignerRegleGenerationContratsForm(
+            compte_id=77,
+        )
+
+        self.assertEqual(
+            list(
+                formulaire.fields['regle_generation']
+                .queryset
+                .values_list('id', flat=True)
+            ),
+            [regle_compte.id],
         )
 
 
@@ -241,6 +272,44 @@ class GenerationLeasesTests(TestCase):
         self.assertEqual(
             Schedule.objects.get(name=nom_tache).next_run,
             next_run_attendu,
+        )
+
+    def test_action_admin_attribue_la_regle_sans_deplacer_le_curseur(self):
+        nouvelle_regle = RegleGenerationLease.objects.create(
+            compte_id=self.compte_id,
+            nom='Nouvelle règle groupée',
+            frequence=Schedule.DAILY,
+            debut=occurrence_aware(2026, 8, 1, 8),
+            actif=True,
+        )
+        prochaine_echeance_initiale = self.contrat.prochaine_echeance
+        request = RequestFactory().post(
+            '/admin/recouvrement/contrat/',
+            {
+                'action': 'assigner_regle_generation',
+                ACTION_CHECKBOX_NAME: [self.contrat.id],
+                'regle_generation': nouvelle_regle.id,
+                'appliquer': '1',
+            },
+        )
+        contrat_admin = admin.site._registry[Contrat]
+
+        with patch.object(contrat_admin, 'message_user') as message_user:
+            resultat = contrat_admin.assigner_regle_generation(
+                request,
+                Contrat.objects.filter(pk=self.contrat.pk),
+            )
+
+        self.assertIsNone(resultat)
+        message_user.assert_called_once()
+        self.contrat.refresh_from_db()
+        self.assertEqual(
+            self.contrat.regle_generation_id,
+            nouvelle_regle.id,
+        )
+        self.assertEqual(
+            self.contrat.prochaine_echeance,
+            prochaine_echeance_initiale,
         )
 
     def test_regle_once_met_fin_au_curseur(self):

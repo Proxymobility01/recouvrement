@@ -1,0 +1,75 @@
+{% extends "admin/base_site.html" %}
+
+{% block breadcrumbs %}
+  <div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">Accueil</a>
+    &rsaquo; <a href="{% url 'admin:app_list' app_label=opts.app_label %}">{{ opts.app_config.verbose_name }}</a>
+    &rsaquo; <a href="{% url 'admin:recouvrement_contrat_changelist' %}">{{ opts.verbose_name_plural|capfirst }}</a>
+    &rsaquo; Attribution d'une règle de génération
+  </div>
+{% endblock %}
+
+{% block content %}
+  <p>
+    Vous êtes sur le point d'attribuer une règle de génération aux
+    <strong>{{ contrats|length }}</strong> contrat(s) ci-dessous.
+  </p>
+
+  <p>
+    Cette action ne modifie pas leur prochaine échéance. Elle détermine
+    uniquement la règle qui calculera les occurrences suivantes.
+  </p>
+
+  <ul>
+    {% for contrat in contrats %}
+      <li>
+        <strong>#{{ contrat.id }}</strong> &mdash;
+        {{ contrat.reference }} &mdash;
+        {{ contrat.nom_complet }} &mdash;
+        règle actuelle :
+        {% if contrat.regle_generation %}
+          {{ contrat.regle_generation }}
+        {% else %}
+          aucune
+        {% endif %}
+      </li>
+    {% endfor %}
+  </ul>
+
+  <form method="post">
+    {% csrf_token %}
+
+    {% for pk in selection %}
+      <input type="hidden" name="{{ action_checkbox_name }}" value="{{ pk }}">
+    {% endfor %}
+    <input type="hidden" name="action" value="assigner_regle_generation">
+
+    <fieldset class="module aligned">
+      {% for field in form %}
+        <div class="form-row">
+          {{ field.errors }}
+          {{ field.label_tag }}
+          {{ field }}
+          {% if field.help_text %}
+            <div class="help">{{ field.help_text }}</div>
+          {% endif %}
+        </div>
+      {% endfor %}
+    </fieldset>
+
+    <div class="submit-row">
+      <input
+        type="submit"
+        name="appliquer"
+        value="Attribuer la règle"
+        class="default"
+      >
+      <a
+        href="{% url 'admin:recouvrement_contrat_changelist' %}"
+        class="button cancel-link"
+      >
+        Annuler
+      </a>
+    </div>
+  </form>
+{% endblock %}
