@@ -72,14 +72,28 @@ class CustomUserRoleAdmin(admin.ModelAdmin):
 
 @admin.register(ConfigPaiement)
 class ConfigPaiementAdmin(admin.ModelAdmin):
-    list_display = ('compte_id', 'base_url', 'created_at', 'updated_at')
-    search_fields = ('compte_id', 'base_url')
-    list_filter = ('created_at',)
+    list_display = (
+        'nom',
+        'compte_id',
+        'actif',
+        'base_url',
+        'created_at',
+        'updated_at',
+    )
+    search_fields = ('nom', 'compte_id', 'base_url')
+    list_filter = ('actif', 'compte_id', 'created_at')
     readonly_fields = ('created_at', 'updated_at')
+    ordering = ('compte_id', 'nom')
+
+    def get_readonly_fields(self, request, obj=None):
+        champs = list(super().get_readonly_fields(request, obj))
+        if obj is not None:
+            champs.append('compte_id')
+        return tuple(champs)
 
     fieldsets = (
         ('Informations Générales', {
-            'fields': ('compte_id',)
+            'fields': ('compte_id', 'nom', 'actif')
         }),
         ('Configuration API (PayGate)', {
             'fields': ('api_key', 'base_url', 'success_url')

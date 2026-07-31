@@ -209,6 +209,21 @@ class ConfigPaiement(BaseModel):
     Stocke les identifiants, URLs et clés de sécurité de la passerelle
     Mobile Money spécifiques à chaque entreprise (Tenant).
     """
+    nom = models.CharField(
+        "Nom de la configuration",
+        max_length=100,
+        help_text=(
+            "Nom interne permettant d'identifier la destination des "
+            "paiements, par exemple : Compte principal ou Flotte premium."
+        ),
+    )
+    actif = models.BooleanField(
+        default=True,
+        help_text=(
+            "Une configuration inactive ne peut plus être utilisée pour "
+            "initier de nouveaux paiements."
+        ),
+    )
     api_key = models.CharField(
         "Clé d'API Passerelle",
         max_length=255,
@@ -231,24 +246,60 @@ class ConfigPaiement(BaseModel):
 
     class Meta:
         db_table = "account_config_paiement"
+        verbose_name = "Configuration de paiement"
+        verbose_name_plural = "Configurations de paiement"
         constraints = [
-            # Sécurité majeure : Une seule configuration de paiement active par entreprise
             models.UniqueConstraint(
-                fields=['compte_id'],
-                name='unique_config_paiement_par_compte'
-            )
+                fields=['compte_id', 'nom'],
+                name='unique_config_paiement_nom_par_compte',
+            ),
         ]
 
     def __str__(self):
-        return f"Configuration Paiement - Compte {self.compte_id}"
+        statut = "" if self.actif else " - inactive"
+        return f"{self.nom} - Compte {self.compte_id}{statut}"
+
+    def clean(self):
+        super().clean()
+        if self.pk:
+            compte_id_initial = (
+                type(self).objects
+                .filter(pk=self.pk)
+                .values_list('compte_id', flat=True)
+                .first()
+            )
+            if (
+                compte_id_initial is not None
+                and compte_id_initial != self.compte_id
+            ):
+                raise ValidationError({
+                    'compte_id': (
+                        "Le compte d'une configuration de paiement ne peut "
+                        "pas être modifié après sa création."
+                    ),
+                })
 
     def save(self, *args, **kwargs):
+        ancien_compte_id = None
+        if self.pk:
+            ancien_compte_id = (
+                type(self).objects
+                .filter(pk=self.pk)
+                .values_list('compte_id', flat=True)
+                .first()
+            )
+        self.full_clean()
         super().save(*args, **kwargs)
-        # Vider le cache à chaque mise à jour de la configuration
         from django.core.cache import cache
+        cache.delete(f"credentials_config_{self.pk}")
+        # Nettoyage de l'ancienne clé utilisée avant le support de plusieurs
+        # configurations, ainsi que d'un éventuel ancien compte.
         cache.delete(f"credentials_{self.compte_id}")
+        if ancien_compte_id and ancien_compte_id != self.compte_id:
+            cache.delete(f"credentials_{ancien_compte_id}")
 
     def delete(self, *args, **kwargs):
         from django.core.cache import cache
+        cache.delete(f"credentials_config_{self.pk}")
         cache.delete(f"credentials_{self.compte_id}")
         super().delete(*args, **kwargs)

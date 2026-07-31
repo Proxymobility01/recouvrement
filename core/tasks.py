@@ -179,7 +179,11 @@ def verifier_statut_session_task(session_id: int):
     logger.info(f"[VerifierStatutSessionTask] Début de la vérification pour la Session ID [{session_id}]")
 
     try:
-        session = SessionPaiement.objects.get(id=session_id)
+        session = (
+            SessionPaiement.objects
+            .select_related('config_paiement')
+            .get(id=session_id)
+        )
     except SessionPaiement.DoesNotExist:
         logger.error(f"[VerifierStatutSessionTask] Erreur : Session ID [{session_id}] introuvable en BDD. Arrêt.")
         return None
@@ -193,8 +197,11 @@ def verifier_statut_session_task(session_id: int):
     # 1. 📞 APPEL À L'AGRÉGATEUR (PayGate)
     # ==========================================
     try:
+        config_paiement = PaymentService.config_paiement_pour_session(
+            session
+        )
         payload = PaymentService.verifier_statut_transaction(
-            compte_id=session.compte_id,
+            config_paiement_id=config_paiement.id,
             gateway_reference=session.gateway_reference
         )
 

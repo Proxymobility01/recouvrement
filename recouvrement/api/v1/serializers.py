@@ -104,7 +104,7 @@ class ContratSerializer(serializers.ModelSerializer):
             'enregistre_par', 'enregistre_par_nom_complet', 'chauffeur_nom_complet',
             'montant_total', 'montant_restant', 'montant_paye', 'montant_par_paiement',
             'frequence', 'date_debut', 'date_fin', 'prochaine_echeance',
-            'statut', 'specificites', 'created_at', 'updated_at'
+            'statut', 'specificites', 'config_paiement', 'created_at', 'updated_at'
         ]
         read_only_fields = [
             'reference', 'montant_restant', 'enregistre_par',
@@ -137,6 +137,25 @@ class ContratSerializer(serializers.ModelSerializer):
         if self.instance is None and value is not None:
             raise serializers.ValidationError("Création de sous-contrat non autorisée ici.")
 
+        return value
+
+    def validate_config_paiement(self, value):
+        if value is None:
+            return value
+
+        request = self.context.get('request')
+        compte_id = getattr(self.instance, 'compte_id', None)
+        if request and getattr(request, 'user', None):
+            if request.user.is_superuser:
+                compte_id = request.data.get('compte_id', compte_id)
+            else:
+                compte_id = request.user.compte_id
+
+        if compte_id is not None and value.compte_id != int(compte_id):
+            raise serializers.ValidationError(
+                "La configuration de paiement doit appartenir au même "
+                "compte que le contrat."
+            )
         return value
 
     def get_fields(self):
@@ -216,6 +235,7 @@ class ContratSerializer(serializers.ModelSerializer):
                 sc_instance_data['compte_id'] = parent_contrat.compte_id
                 sc_instance_data['nom_complet'] = parent_contrat.nom_complet
                 sc_instance_data['enregistre_par'] = parent_contrat.enregistre_par
+                sc_instance_data['config_paiement'] = parent_contrat.config_paiement
 
                 sc_total = sc_instance_data.get('montant_total', Decimal('0.00'))
                 sc_avance = sc_instance_data.get('montant_paye', Decimal('0.00'))
@@ -294,7 +314,13 @@ class LignePaiementSerializer(serializers.Serializer):
     def validate_lease_id(self, value):
         user = self.context['request'].user
         try:
-            lease_query = Lease.objects.select_related('contrat').filter(id=value, contrat__compte_id=user.compte_id)
+            lease_query = Lease.objects.select_related(
+                'contrat',
+                'contrat__config_paiement',
+            ).filter(
+                id=value,
+                contrat__compte_id=user.compte_id,
+            )
             if not user.is_staff and not user.is_superuser:
                 lease_query = lease_query.filter(contrat__chauffeur=user)
 
@@ -627,6 +653,12 @@ class PenaliteSerializer(serializers.ModelSerializer):
 
 
 class SessionPaiementSerializer(serializers.ModelSerializer):
+    config_paiement_nom = serializers.CharField(
+        source='config_paiement.nom',
+        read_only=True,
+        default=None,
+    )
+
     class Meta:
         model = SessionPaiement
         fields = [
@@ -635,6 +667,8 @@ class SessionPaiementSerializer(serializers.ModelSerializer):
             'statut',
             'montant_total',
             'telephone',
+            'config_paiement',
+            'config_paiement_nom',
             'date_validation',
             'created_at',
         ]

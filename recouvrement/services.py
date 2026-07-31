@@ -506,27 +506,140 @@ class PaymentService:
     # CONFIG (cache Redis 24h)
     # ------------------------------------------------------------------ #
     @classmethod
-    def _get_config(cls, compte_id, force_refresh=False):
-        cache_key = f"credentials_{compte_id}"
+    def resoudre_config_paiement_pour_leases(cls, leases):
+        """
+        Détermine l'unique configuration autorisée pour un panier.
+
+        La destination financière provient toujours de la configuration
+        explicitement affectée au contrat payé. Le client ne la choisit
+        jamais.
+        """
+        leases = list(leases)
+        if not leases:
+            raise CustomAPIException(
+                resp_code=ErrorCodes.BAD_REQUEST,
+                status_code=400,
+                dev_message="Aucune échéance n'a été fournie.",
+            )
+
+        configurations = {}
+
+        for lease in leases:
+            contrat = lease.contrat
+            if lease.compte_id != contrat.compte_id:
+                raise CustomAPIException(
+                    resp_code=ErrorCodes.BAD_REQUEST,
+                    status_code=400,
+                    dev_message=(
+                        f"Incohérence de compte entre l'échéance {lease.id} "
+                        f"et son contrat {contrat.id}."
+                    ),
+                )
+
+            if not contrat.config_paiement_id:
+                raise CustomAPIException(
+                    resp_code=ErrorCodes.BAD_REQUEST,
+                    status_code=400,
+                    dev_message=(
+                        "Aucune configuration Mobile Money n'est affectée "
+                        f"au contrat {contrat.reference}."
+                    ),
+                )
+
+            config = contrat.config_paiement
+            if config.compte_id != contrat.compte_id:
+                raise CustomAPIException(
+                    resp_code=ErrorCodes.BAD_REQUEST,
+                    status_code=400,
+                    dev_message=(
+                        f"La configuration de paiement du contrat "
+                        f"{contrat.reference} appartient à un autre compte."
+                    ),
+                )
+            if not config.actif:
+                raise CustomAPIException(
+                    resp_code=ErrorCodes.BAD_REQUEST,
+                    status_code=400,
+                    dev_message=(
+                        f"La configuration de paiement affectée au contrat "
+                        f"{contrat.reference} est inactive."
+                    ),
+                )
+
+            configurations[config.id] = config
+
+        if len(configurations) != 1:
+            raise CustomAPIException(
+                resp_code=ErrorCodes.BAD_REQUEST,
+                status_code=400,
+                dev_message=(
+                    "Les échéances sélectionnées utilisent des "
+                    "configurations de paiement différentes. Veuillez "
+                    "effectuer deux paiements séparés."
+                ),
+            )
+
+        return next(iter(configurations.values()))
+
+    @classmethod
+    def config_paiement_pour_session(cls, session):
+        """
+        Retourne la configuration explicitement mémorisée par la session.
+        """
+        if not session.config_paiement_id:
+            raise CustomAPIException(
+                resp_code=ErrorCodes.SYSTEM_ERROR,
+                status_code=500,
+                dev_message=(
+                    "La session de paiement ne possède aucune configuration."
+                ),
+            )
+
+        config = session.config_paiement
+        if config.compte_id != session.compte_id:
+            raise CustomAPIException(
+                resp_code=ErrorCodes.SYSTEM_ERROR,
+                status_code=500,
+                dev_message=(
+                    "La configuration mémorisée par la session appartient "
+                    "à un autre compte."
+                ),
+            )
+        return config
+
+    @classmethod
+    def _get_config(cls, config_paiement_id, force_refresh=False):
+        cache_key = f"credentials_config_{config_paiement_id}"
 
         if force_refresh:
             cache.delete(cache_key)
-            logger.info(f"🔄 Cache de configuration invalidé pour le compte {compte_id}.")
+            logger.info(
+                "Cache de configuration invalidé pour la configuration %s.",
+                config_paiement_id,
+            )
         else:
             cached_config = cache.get(cache_key)
             if cached_config:
                 return cached_config
 
-        config = ConfigPaiement.objects.filter(compte_id=compte_id).first()
+        config = ConfigPaiement.objects.filter(pk=config_paiement_id).first()
         if not config:
-            logger.error(f"[PayGate] compte_id {compte_id} sans configuration de paiement.")
+            logger.error(
+                "[PayGate] Configuration de paiement %s introuvable.",
+                config_paiement_id,
+            )
             raise CustomAPIException(
                 resp_code=ErrorCodes.SYSTEM_ERROR,
                 status_code=400,
-                dev_message=f"Le partenaire (compte_id: {compte_id}) n'a pas configuré ses identifiants."
+                dev_message=(
+                    f"La configuration de paiement {config_paiement_id} "
+                    "est introuvable."
+                ),
             )
 
         config_data = {
+            "id":          config.id,
+            "compte_id":  config.compte_id,
             "api_key":     config.api_key,
             "base_url":    config.base_url.rstrip('/'),
             "success_url": config.success_url,
@@ -538,7 +651,13 @@ class PaymentService:
     # INITIATION : checkout puis collect
     # ------------------------------------------------------------------ #
     @classmethod
-    def traiter_paiement_complet(cls, compte_id, montant, external_reference, phone_number):
+    def traiter_paiement_complet(
+        cls,
+        config_paiement_id,
+        montant,
+        external_reference,
+        phone_number,
+    ):
         """
         Enchaîne checkout puis collect dans une session HTTP unique (Keep-Alive).
 
@@ -553,7 +672,7 @@ class PaymentService:
         Lève CustomAPIException si le CHECKOUT échoue
         (rien n'a été créé côté PayGate → ECHEC certain côté appelant).
         """
-        config      = cls._get_config(compte_id)
+        config = cls._get_config(config_paiement_id)
         base_url    = config['base_url']
         local_phone = format_phone_cm(phone_number)
 
@@ -582,7 +701,10 @@ class PaymentService:
                 # Clé expirée : on rafraîchit le cache et on retente une fois.
                 if response_checkout.status_code == 401:
                     logger.warning("[PayGate] Clé d'API rejetée au checkout. Rafraîchissement...")
-                    config  = cls._get_config(compte_id, force_refresh=True)
+                    config = cls._get_config(
+                        config_paiement_id,
+                        force_refresh=True,
+                    )
                     headers = cls._auth_headers(config['api_key'])
                     response_checkout = http.post(
                         url_checkout, json=checkout_payload, headers=headers, timeout=15
@@ -689,7 +811,11 @@ class PaymentService:
     # VÉRIFICATION (pull) — source de vérité pour le polling
     # ------------------------------------------------------------------ #
     @classmethod
-    def verifier_statut_transaction(cls, compte_id, gateway_reference):
+    def verifier_statut_transaction(
+        cls,
+        config_paiement_id,
+        gateway_reference,
+    ):
         """
         Interroge PayGate sur l'état réel d'une transaction.
         Filet de sécurité si le webhook est perdu ou en retard.
@@ -699,20 +825,23 @@ class PaymentService:
             # d'une vraie panne réseau pour ne pas boucler inutilement.
             raise ValueError("Une gateway_reference est requise pour vérifier la transaction.")
 
-        config = cls._get_config(compte_id)
+        config = cls._get_config(config_paiement_id)
         url    = f"{config['base_url']}/transaction/{gateway_reference}/"
 
         try:
             logger.info(
                 f"[PayGate] Vérification de la transaction "
-                f"{gateway_reference} (Compte {compte_id})"
+                f"{gateway_reference} (Configuration {config_paiement_id})"
             )
             headers  = cls._auth_headers(config['api_key'])
             response = requests.get(url, headers=headers, timeout=10)
 
             if response.status_code == 401:
                 logger.warning("[PayGate] Clé rejetée à la vérification. Rafraîchissement...")
-                config   = cls._get_config(compte_id, force_refresh=True)
+                config = cls._get_config(
+                    config_paiement_id,
+                    force_refresh=True,
+                )
                 headers  = cls._auth_headers(config['api_key'])
                 response = requests.get(url, headers=headers, timeout=10)
 

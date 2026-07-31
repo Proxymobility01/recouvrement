@@ -18,7 +18,6 @@ from rest_framework.generics import GenericAPIView
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from accounts.models import ConfigPaiement
 from core.filters import LeaseFilter, ContratFilter, PaiementFilter, PenaliteFilter, ReglePenaliteFilter, \
     SessionPaiementFilter
 from core.pagination import StandardResultsSetPagination
@@ -226,6 +225,7 @@ class ContratViewSet(TenantModelViewSet):
         sc_instance_data['compte_id'] = parent_contrat.compte_id
         sc_instance_data['nom_complet'] = parent_contrat.nom_complet
         sc_instance_data['enregistre_par'] = request.user
+        sc_instance_data['config_paiement'] = parent_contrat.config_paiement
 
         # Injection des valeurs calculées
         sc_instance_data['montant_paye'] = sc_avance
@@ -428,6 +428,34 @@ class InitiationPaiementView(GenericAPIView):
         phone_number = format_phone_cm(serializer.validated_data.get('phone_number'))
         total_montant = sum(ligne['montant'] for ligne in lignes)
 
+        leases = [ligne['lease_id'] for ligne in lignes]
+        config_paiement = (
+            PaymentService.resoudre_config_paiement_pour_leases(leases)
+        )
+        comptes_contrats = {
+            lease.contrat.compte_id
+            for lease in leases
+        }
+        if len(comptes_contrats) != 1:
+            raise CustomAPIException(
+                resp_code=ErrorCodes.BAD_REQUEST,
+                status_code=400,
+                dev_message=(
+                    "Les échéances sélectionnées appartiennent à des "
+                    "comptes différents."
+                ),
+            )
+        compte_id_paiement = comptes_contrats.pop()
+        if compte_id_paiement != request.user.compte_id:
+            raise CustomAPIException(
+                resp_code=ErrorCodes.FORBIDDEN,
+                status_code=403,
+                dev_message=(
+                    "Le compte de l'utilisateur ne correspond pas au compte "
+                    "des contrats sélectionnés."
+                ),
+            )
+
         reference_session = SessionPaiement.generer_reference_session()
 
         # ================================================================
@@ -441,7 +469,8 @@ class InitiationPaiementView(GenericAPIView):
                     montant_total=total_montant,
                     telephone=phone_number,
                     utilisateur=request.user,
-                    compte_id=request.user.compte_id,
+                    compte_id=compte_id_paiement,
+                    config_paiement=config_paiement,
                     statut=SessionPaiement.STATUT_EN_ATTENTE,
                 )
                 for ligne in lignes:
@@ -450,7 +479,7 @@ class InitiationPaiementView(GenericAPIView):
                         contrat=ligne['lease_id'].contrat,
                         lease=ligne['lease_id'],
                         enregistre_par=request.user,
-                        compte_id=request.user.compte_id,
+                        compte_id=ligne['lease_id'].contrat.compte_id,
                         montant=ligne['montant'],
                         methode=Paiement.METHODE_MOBILE_MONEY,
                     )
@@ -467,7 +496,7 @@ class InitiationPaiementView(GenericAPIView):
         # ================================================================
         try:
             resultat = PaymentService.traiter_paiement_complet(
-                compte_id=request.user.compte_id,
+                config_paiement_id=config_paiement.id,
                 montant=total_montant,
                 external_reference=reference_session,
                 phone_number=phone_number,
@@ -589,7 +618,11 @@ class WebhookView(APIView):
 
         # 3. Recherche du panier (Session)
         try:
-            session = SessionPaiement.objects.get(reference=external_reference)
+            session = (
+                SessionPaiement.objects
+                .select_related('config_paiement')
+                .get(reference=external_reference)
+            )
         except SessionPaiement.DoesNotExist:
             logger.warning(f"[Webhook] Référence introuvable : {external_reference}")
             raise CustomAPIException(
@@ -599,7 +632,7 @@ class WebhookView(APIView):
             )
 
         # 4. SÉCURITÉ : Validation HMAC SHA-256 Multi-Tenant
-        config = ConfigPaiement.objects.filter(compte_id=session.compte_id).first()
+        config = PaymentService.config_paiement_pour_session(session)
 
         if not config or not getattr(config, 'webhook_secret', None):
             logger.error(f"[Webhook] Configuration manquante pour le compte {session.compte_id}.")
@@ -708,7 +741,7 @@ class PaiementViewSet(TenantModelViewSet):
     ordering = ['-date_paiement']
 
     def get_queryset(self):
-        qs = super().get_queryset().select_related('enregistre_par', 'contrat', 'lease')
+        qs = super().get_queryset().select_related('enregistre_par', 'contrat', 'lease','session')
         user = self.request.user
 
         if user.is_superuser or  user.has_perm('recouvrement.view_all_paiements'):
@@ -938,7 +971,10 @@ class SessionPaiementViewSet(TenantModelViewSet):
     ordering = ['-created_at']
 
     def get_queryset(self):
-        qs = super().get_queryset()
+        qs = super().get_queryset().select_related(
+            'config_paiement',
+            'utilisateur',
+        )
         user = self.request.user
         if user.is_superuser:
             return qs

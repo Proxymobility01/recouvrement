@@ -1,3 +1,6 @@
+import hashlib
+import hmac
+import json
 from datetime import date, datetime
 from decimal import Decimal
 from io import StringIO
@@ -6,17 +9,22 @@ from unittest.mock import patch
 
 from django.contrib import admin
 from django.contrib.admin.helpers import ACTION_CHECKBOX_NAME
+from django.core.exceptions import ValidationError
 from django.core.management import call_command
 from django.test import RequestFactory, SimpleTestCase, TestCase
 from django.utils import timezone
 from django_q.models import Schedule
+from rest_framework.test import APIRequestFactory, force_authenticate
 
-from accounts.models import CustomUser
+from accounts.models import ConfigPaiement, CustomUser
+from core.exceptions import CustomAPIException
 from core.tasks import (
     generer_leases_task,
     paiement_task,
+    verifier_statut_session_task,
 )
 from recouvrement.admin import (
+    AssignerConfigPaiementContratsForm,
     AssignerRegleGenerationContratsForm,
     ContratAdminForm,
     RegleGenerationLeaseAdminForm,
@@ -29,7 +37,12 @@ from recouvrement.models import (
     SessionPaiement,
     TypeContrat,
 )
+from recouvrement.api.v1.views import (
+    InitiationPaiementView,
+    WebhookView,
+)
 from recouvrement.services import (
+    PaymentService,
     calculer_prochaine_occurrence,
     generer_leases_pour_regle,
 )
@@ -75,6 +88,333 @@ class CalculProchaineOccurrenceTests(SimpleTestCase):
         self.assertEqual(
             suivante,
             occurrence_aware(2026, 7, 30, 12),
+        )
+
+
+class ConfigurationPaiementTests(TestCase):
+    compte_id = 77
+
+    def setUp(self):
+        self.utilisateur = CustomUser.objects.create(
+            keycloak_id='payment-config-user',
+            compte_id=self.compte_id,
+            nom_complet='Payeur configuration',
+            is_active=True,
+            is_staff=True,
+            is_superuser=True,
+        )
+        self.type_contrat = TypeContrat.objects.create(
+            compte_id=self.compte_id,
+            libelle='Véhicule paiement',
+            code='PAY-CONFIG',
+            est_principal=True,
+        )
+        self.config_defaut = ConfigPaiement.objects.create(
+            compte_id=self.compte_id,
+            nom='Encaissement principal',
+            api_key='api-key-principale',
+            base_url='https://principal.paygate.test',
+            success_url='https://principal.test/success',
+            webhook_secret='secret-principal',
+            actif=True,
+        )
+        self.config_speciale = ConfigPaiement.objects.create(
+            compte_id=self.compte_id,
+            nom='Encaissement spécial',
+            api_key='api-key-speciale',
+            base_url='https://special.paygate.test',
+            success_url='https://special.test/success',
+            webhook_secret='secret-special',
+            actif=True,
+        )
+        self.contrat_defaut = self._creer_contrat(
+            nom='Contrat configuration principale',
+            config_paiement=self.config_defaut,
+        )
+        self.contrat_special = self._creer_contrat(
+            nom='Sous-contrat configuration spéciale',
+            parent=self.contrat_defaut,
+            config_paiement=self.config_speciale,
+        )
+        self.lease_defaut = Lease.objects.create(
+            compte_id=self.compte_id,
+            contrat=self.contrat_defaut,
+            date_echeance=occurrence_aware(2026, 7, 31, 12),
+            montant_attendu=Decimal('50.00'),
+        )
+        self.lease_special = Lease.objects.create(
+            compte_id=self.compte_id,
+            contrat=self.contrat_special,
+            date_echeance=occurrence_aware(2026, 7, 31, 12),
+            montant_attendu=Decimal('50.00'),
+        )
+
+    def _creer_contrat(
+        self,
+        nom,
+        config_paiement,
+        parent=None,
+    ):
+        return Contrat.objects.create(
+            compte_id=self.compte_id,
+            chauffeur=self.utilisateur,
+            enregistre_par=self.utilisateur,
+            type_contrat=self.type_contrat,
+            parent=parent,
+            nom_complet=nom,
+            montant_total=Decimal('1000.00'),
+            montant_restant=Decimal('1000.00'),
+            montant_par_paiement=Decimal('50.00'),
+            montant_paye=Decimal('0.00'),
+            frequence=Contrat.JOURNALIER,
+            date_debut=date(2026, 7, 31),
+            date_fin=date(2026, 12, 31),
+            prochaine_echeance=occurrence_aware(2026, 7, 31, 12),
+            statut=Contrat.STATUT_ACTIF,
+            config_paiement=config_paiement,
+        )
+
+    def _creer_session(self, config):
+        return SessionPaiement.objects.create(
+            compte_id=self.compte_id,
+            reference=SessionPaiement.generer_reference_session(),
+            gateway_reference='GATEWAY.TEST',
+            montant_total=Decimal('50.00'),
+            telephone='690000000',
+            utilisateur=self.utilisateur,
+            config_paiement=config,
+            statut=SessionPaiement.STATUT_EN_ATTENTE,
+        )
+
+    def test_plusieurs_configurations_du_meme_compte_sont_autorisees(self):
+        self.assertEqual(
+            ConfigPaiement.objects.filter(compte_id=self.compte_id).count(),
+            2,
+        )
+
+    def test_compte_configuration_est_immuable(self):
+        self.config_speciale.compte_id = 88
+        with self.assertRaises(ValidationError):
+            self.config_speciale.save()
+
+    def test_resolution_utilise_la_configuration_affectee_au_contrat(self):
+        self.assertEqual(
+            PaymentService.resoudre_config_paiement_pour_leases([
+                self.lease_defaut,
+            ]),
+            self.config_defaut,
+        )
+        self.assertEqual(
+            PaymentService.resoudre_config_paiement_pour_leases([
+                self.lease_special,
+            ]),
+            self.config_speciale,
+        )
+
+    def test_contrat_et_session_acceptent_une_configuration_vide(self):
+        self.contrat_defaut.config_paiement = None
+        self.contrat_defaut.save(update_fields=['config_paiement'])
+        session = self._creer_session(None)
+
+        self.contrat_defaut.refresh_from_db()
+        self.assertIsNone(self.contrat_defaut.config_paiement_id)
+        self.assertIsNone(session.config_paiement_id)
+
+    def test_mobile_money_refuse_un_contrat_sans_configuration(self):
+        self.contrat_defaut.config_paiement = None
+        self.contrat_defaut.save(update_fields=['config_paiement'])
+
+        with self.assertRaises(CustomAPIException) as contexte:
+            PaymentService.resoudre_config_paiement_pour_leases([
+                self.lease_defaut,
+            ])
+
+        self.assertEqual(contexte.exception.status_code, 400)
+        self.assertIn('Mobile Money', contexte.exception.dev_message)
+
+    def test_panier_de_configurations_differentes_est_refuse(self):
+        with self.assertRaises(CustomAPIException) as contexte:
+            PaymentService.resoudre_config_paiement_pour_leases([
+                self.lease_defaut,
+                self.lease_special,
+            ])
+
+        self.assertEqual(contexte.exception.status_code, 400)
+        self.assertEqual(
+            contexte.exception.dev_message,
+            "Les échéances sélectionnées utilisent des configurations de "
+            "paiement différentes. Veuillez effectuer deux paiements "
+            "séparés.",
+        )
+
+    def test_configuration_inactive_est_refusee(self):
+        self.config_speciale.actif = False
+        self.config_speciale.save(update_fields=['actif'])
+
+        with self.assertRaises(CustomAPIException) as contexte:
+            PaymentService.resoudre_config_paiement_pour_leases([
+                self.lease_special,
+            ])
+
+        self.assertEqual(contexte.exception.status_code, 400)
+        self.assertIn('inactive', contexte.exception.dev_message)
+
+    def test_action_admin_affecte_une_configuration_du_meme_compte(self):
+        formulaire = AssignerConfigPaiementContratsForm(
+            compte_id=self.compte_id,
+        )
+        self.assertFalse(formulaire.fields['config_paiement'].required)
+        formulaire_sans_config = AssignerConfigPaiementContratsForm(
+            data={'config_paiement': ''},
+            compte_id=self.compte_id,
+        )
+        self.assertTrue(formulaire_sans_config.is_valid())
+        self.assertIsNone(
+            formulaire_sans_config.cleaned_data['config_paiement']
+        )
+        self.assertEqual(
+            set(
+                formulaire.fields['config_paiement']
+                .queryset
+                .values_list('id', flat=True)
+            ),
+            {self.config_defaut.id, self.config_speciale.id},
+        )
+
+        request = RequestFactory().post(
+            '/admin/recouvrement/contrat/',
+            {
+                'action': 'assigner_config_paiement',
+                ACTION_CHECKBOX_NAME: [self.contrat_defaut.id],
+                'config_paiement': self.config_speciale.id,
+                'appliquer_config_paiement': '1',
+            },
+        )
+        contrat_admin = admin.site._registry[Contrat]
+        with patch.object(contrat_admin, 'message_user'):
+            resultat = contrat_admin.assigner_config_paiement(
+                request,
+                Contrat.objects.filter(pk=self.contrat_defaut.pk),
+            )
+
+        self.assertIsNone(resultat)
+        self.contrat_defaut.refresh_from_db()
+        self.assertEqual(
+            self.contrat_defaut.config_paiement_id,
+            self.config_speciale.id,
+        )
+
+    def test_initiation_memorise_la_configuration_sur_la_session(self):
+        request = APIRequestFactory().post(
+            '/api/v1/initier-paiement/',
+            {
+                'lignes': [{
+                    'lease_id': self.lease_special.id,
+                    'montant': '50.00',
+                }],
+                'phone_number': '690000000',
+            },
+            format='json',
+        )
+        force_authenticate(request, user=self.utilisateur)
+
+        with (
+            patch(
+                'recouvrement.api.v1.views.PaymentService.'
+                'traiter_paiement_complet',
+                return_value={
+                    'paygate_reference': 'PAYGATE.CONFIG.TEST',
+                    'session_token': 'token-test',
+                    'collect_ok': True,
+                    'collect_error': None,
+                },
+            ) as traiter,
+            patch('recouvrement.api.v1.views._schedule_next_verification'),
+        ):
+            response = InitiationPaiementView.as_view()(request)
+
+        self.assertEqual(response.status_code, 201)
+        session = SessionPaiement.objects.get(
+            reference=response.data['reference_interne'],
+        )
+        self.assertEqual(
+            session.config_paiement_id,
+            self.config_speciale.id,
+        )
+        self.assertEqual(session.compte_id, self.contrat_special.compte_id)
+        self.assertEqual(
+            traiter.call_args.kwargs['config_paiement_id'],
+            self.config_speciale.id,
+        )
+
+    def test_initiation_mixte_retourne_400_sans_creer_de_session(self):
+        request = APIRequestFactory().post(
+            '/api/v1/initier-paiement/',
+            {
+                'lignes': [
+                    {'lease_id': self.lease_defaut.id, 'montant': '10.00'},
+                    {'lease_id': self.lease_special.id, 'montant': '10.00'},
+                ],
+                'phone_number': '690000000',
+            },
+            format='json',
+        )
+        force_authenticate(request, user=self.utilisateur)
+
+        nombre_sessions_avant = SessionPaiement.objects.count()
+        response = InitiationPaiementView.as_view()(request)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.data['dev_message'],
+            "Les échéances sélectionnées utilisent des configurations de "
+            "paiement différentes. Veuillez effectuer deux paiements "
+            "séparés.",
+        )
+        self.assertEqual(
+            SessionPaiement.objects.count(),
+            nombre_sessions_avant,
+        )
+
+    def test_webhook_utilise_le_secret_memorise_sur_la_session(self):
+        session = self._creer_session(self.config_speciale)
+        payload = {
+            'external_reference': session.reference,
+            'reference': session.gateway_reference,
+            'status': 'PENDING',
+        }
+        corps = json.dumps(payload).encode('utf-8')
+        signature = hmac.new(
+            self.config_speciale.webhook_secret.encode('utf-8'),
+            corps,
+            hashlib.sha256,
+        ).hexdigest()
+        request = APIRequestFactory().generic(
+            'POST',
+            '/api/v1/webhook/',
+            corps,
+            content_type='application/json',
+            HTTP_X_SIGNATURE=signature,
+        )
+
+        response = WebhookView.as_view()(request)
+
+        self.assertEqual(response.status_code, 200)
+
+    def test_polling_utilise_la_configuration_memorisee(self):
+        session = self._creer_session(self.config_speciale)
+        with (
+            patch(
+                'core.tasks.PaymentService.verifier_statut_transaction',
+                return_value={'status': 'PENDING'},
+            ) as verifier,
+            patch('core.tasks._schedule_next_verification'),
+        ):
+            verifier_statut_session_task(session.id)
+
+        self.assertEqual(
+            verifier.call_args.kwargs['config_paiement_id'],
+            self.config_speciale.id,
         )
 
 
@@ -162,6 +502,15 @@ class GenerationLeasesTests(TestCase):
             code='VEH-TEST',
             est_principal=True,
         )
+        self.config_paiement = ConfigPaiement.objects.create(
+            compte_id=self.compte_id,
+            nom='Encaissement generation tests',
+            api_key='api-key-generation',
+            base_url='https://generation.paygate.test',
+            success_url='https://generation.test/success',
+            webhook_secret='secret-generation',
+            actif=True,
+        )
         self.regle = RegleGenerationLease.objects.create(
             compte_id=self.compte_id,
             nom='Deux fois par jour - tests',
@@ -186,6 +535,7 @@ class GenerationLeasesTests(TestCase):
             prochaine_echeance=occurrence_aware(2026, 7, 29, 12),
             statut=Contrat.STATUT_ACTIF,
             regle_generation=self.regle,
+            config_paiement=self.config_paiement,
         )
 
     def test_rattrapage_jusqua_22h_genere_deux_occurrences(self):
@@ -351,6 +701,7 @@ class GenerationLeasesTests(TestCase):
         session = SessionPaiement.objects.create(
             compte_id=self.compte_id,
             reference='MOB.TEST.MULTI',
+            config_paiement=self.config_paiement,
             montant_total=Decimal('10000.00'),
             utilisateur=self.chauffeur,
             statut=SessionPaiement.STATUT_VALIDE,
@@ -405,6 +756,7 @@ class GenerationLeasesTests(TestCase):
         session = SessionPaiement.objects.create(
             compte_id=self.compte_id,
             reference='MOB.TEST.PARTIEL',
+            config_paiement=self.config_paiement,
             montant_total=Decimal('2000.00'),
             utilisateur=self.chauffeur,
             statut=SessionPaiement.STATUT_VALIDE,

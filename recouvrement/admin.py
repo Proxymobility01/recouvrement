@@ -10,6 +10,7 @@ from django.utils.html import format_html
 from django_q.models import Schedule
 from croniter import croniter
 from rangefilter.filters import DateRangeFilter, DateRangeQuickSelectListFilter
+from accounts.models import ConfigPaiement
 from .services import annuler_leases_et_prolonger, AnnulationLeaseError
 from .models import (
     TypeContrat,
@@ -104,6 +105,28 @@ class AssignerRegleGenerationContratsForm(forms.Form):
         )
 
 
+class AssignerConfigPaiementContratsForm(forms.Form):
+    config_paiement = forms.ModelChoiceField(
+        label="Configuration de paiement",
+        queryset=ConfigPaiement.objects.none(),
+        required=False,
+        empty_label="Aucune configuration Mobile Money",
+        help_text=(
+            "Les contrats sans configuration restent payables par les "
+            "autres moyens, mais pas par Mobile Money."
+        ),
+    )
+
+    def __init__(self, *args, compte_id=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        if compte_id is not None:
+            self.fields['config_paiement'].queryset = (
+                ConfigPaiement.objects
+                .filter(compte_id=compte_id)
+                .order_by('-actif', 'nom')
+            )
+
+
 class ContratAdminForm(forms.ModelForm):
     class Meta:
         model = Contrat
@@ -113,6 +136,7 @@ class ContratAdminForm(forms.ModelForm):
         cleaned_data = super().clean()
         compte_id = cleaned_data.get('compte_id')
         regle_generation = cleaned_data.get('regle_generation')
+        config_paiement = cleaned_data.get('config_paiement')
 
         if (
             compte_id is not None
@@ -123,6 +147,17 @@ class ContratAdminForm(forms.ModelForm):
                 'regle_generation',
                 "La règle de génération doit appartenir au même compte "
                 "que le contrat.",
+            )
+
+        if (
+            compte_id is not None
+            and config_paiement is not None
+            and config_paiement.compte_id != compte_id
+        ):
+            self.add_error(
+                'config_paiement',
+                "La configuration de paiement doit appartenir au même "
+                "compte que le contrat.",
             )
 
         return cleaned_data
@@ -194,13 +229,17 @@ class TypeContratAdmin(admin.ModelAdmin):
 @admin.register(Contrat)
 class ContratAdmin(admin.ModelAdmin):
     form = ContratAdminForm
-    actions = ['assigner_regle_generation']
+    actions = [
+        'assigner_regle_generation',
+        'assigner_config_paiement',
+    ]
     list_display = (
         'id_reference',
         'nom_complet',
         'type_contrat',
         'statut',
         'regle_generation',
+        'config_paiement',
         'montant_total',
         'montant_paye',
         'montant_restant',
@@ -214,6 +253,7 @@ class ContratAdmin(admin.ModelAdmin):
         'type_contrat',
         'regle_generation',
         'regle_penalite',
+        'config_paiement',
     )
     list_filter = (
         ('created_at', DateRangeAvecHierFilter),
@@ -223,6 +263,7 @@ class ContratAdmin(admin.ModelAdmin):
         'type_contrat',
         'compte_id',
         'regle_generation',
+        'config_paiement',
         'regle_penalite',
     )
     search_fields = ('reference', 'nom_complet', 'immatriculation', 'vin', 'chauffeur__email')
@@ -234,6 +275,7 @@ class ContratAdmin(admin.ModelAdmin):
         'enregistre_par',
         'parent',
         'regle_generation',
+        'config_paiement',
         'regle_penalite',
     )
 
@@ -260,7 +302,7 @@ class ContratAdmin(admin.ModelAdmin):
         }),
         ('Finances & Échéancier', {
             'fields': ('montant_total', 'montant_restant', 'montant_paye', 'montant_par_paiement', 'frequence',
-                       'regle_generation', 'regle_penalite')
+                       'regle_generation', 'regle_penalite', 'config_paiement')
         }),
         ('Dates', {
             'fields': ('date_debut', 'date_fin', 'prochaine_echeance', 'created_at', 'updated_at')
@@ -332,13 +374,90 @@ class ContratAdmin(admin.ModelAdmin):
             },
         )
 
+    @admin.action(
+        description=(
+            "Attribuer une configuration de paiement aux contrats sélectionnés"
+        )
+    )
+    def assigner_config_paiement(self, request, queryset):
+        compte_ids = list(
+            queryset
+            .order_by()
+            .values_list('compte_id', flat=True)
+            .distinct()[:2]
+        )
+
+        if len(compte_ids) != 1:
+            self.message_user(
+                request,
+                "Sélectionnez uniquement des contrats appartenant au même "
+                "compte avant d'attribuer une configuration de paiement.",
+                level=messages.ERROR,
+            )
+            return None
+
+        compte_id = compte_ids[0]
+        if 'appliquer_config_paiement' in request.POST:
+            form = AssignerConfigPaiementContratsForm(
+                request.POST,
+                compte_id=compte_id,
+            )
+            if form.is_valid():
+                config = form.cleaned_data['config_paiement']
+                contrats_modifies = queryset.update(
+                    config_paiement=config,
+                    updated_at=timezone.now(),
+                )
+                destination = (
+                    f"la configuration « {config.nom} »"
+                    if config
+                    else "aucune configuration Mobile Money"
+                )
+                self.message_user(
+                    request,
+                    f"{contrats_modifies} contrat(s) utiliseront désormais "
+                    f"{destination}.",
+                    level=messages.SUCCESS,
+                )
+                return None
+        else:
+            form = AssignerConfigPaiementContratsForm(
+                compte_id=compte_id,
+            )
+
+        return render(
+            request,
+            'admin/recouvrement/assigner_config_paiement.html',
+            {
+                **self.admin_site.each_context(request),
+                'title': (
+                    "Attribuer une configuration de paiement aux contrats"
+                ),
+                'contrats': queryset.select_related('config_paiement'),
+                'form': form,
+                'action_checkbox_name': ACTION_CHECKBOX_NAME,
+                'selection': queryset.values_list('pk', flat=True),
+                'opts': self.model._meta,
+            },
+        )
+
 
 @admin.register(Transaction)
 class TransactionAdmin(admin.ModelAdmin):
     """
     C'est ici qu'on gère l'affichage de SessionPaiement sous le nom "Transaction".
     """
-    list_display = ('reference', 'montant_total', 'statut', 'telephone', 'date_validation', 'created_at', 'compte_id')
+    list_display = (
+        'reference',
+        'montant_total',
+        'statut',
+        'config_paiement',
+        'telephone',
+        'date_validation',
+        'created_at',
+        'compte_id',
+    )
+    list_select_related = ('config_paiement', 'utilisateur')
     list_filter = (
         ('created_at', DateRangeAvecHierFilter),
         ('date_validation', DateRangeAvecHierFilter),
@@ -348,8 +467,15 @@ class TransactionAdmin(admin.ModelAdmin):
     raw_id_fields = ('utilisateur',)
 
     # Personne ne doit pouvoir modifier un payload d'audit ou une date de validation de passerelle
-    readonly_fields = ('reference', 'gateway_reference', 'webhook_payload', 'date_validation', 'created_at',
-                       'updated_at')
+    readonly_fields = (
+        'reference',
+        'gateway_reference',
+        'config_paiement',
+        'webhook_payload',
+        'date_validation',
+        'created_at',
+        'updated_at',
+    )
     ordering = ('-created_at',)
 
 

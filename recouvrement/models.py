@@ -157,6 +157,19 @@ class Contrat(BaseModel):
         verbose_name="Règle de génération"
     )
 
+    config_paiement = models.ForeignKey(
+        'accounts.ConfigPaiement',
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name='contrats',
+        verbose_name="Configuration de paiement",
+        help_text=(
+            "Configuration utilisée pour les paiements Mobile Money. "
+            "Elle peut rester vide pour les autres moyens de paiement."
+        ),
+    )
+
     class Meta:
         db_table = "rc_contrat"
         constraints = [
@@ -279,6 +292,19 @@ class SessionPaiement(BaseModel):
         CustomUser,
         on_delete=models.PROTECT,
         related_name="sessions_initiees"
+    )
+
+    config_paiement = models.ForeignKey(
+        'accounts.ConfigPaiement',
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name='sessions_paiement',
+        verbose_name="Configuration de paiement utilisée",
+        help_text=(
+            "Configuration ayant servi à créer une transaction Mobile "
+            "Money. Elle peut rester vide pour les autres paiements."
+        ),
     )
 
     @classmethod
