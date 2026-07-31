@@ -1,111 +1,125 @@
-from django.core.management.base import BaseCommand
-from django.db import transaction
-from datetime import date, timedelta, datetime
-from dateutil.relativedelta import relativedelta
-import logging
+from django.core.management.base import BaseCommand, CommandError
 
-from recouvrement.models import Contrat, Lease, Parametre
+from recouvrement.models import RegleGenerationLease
+from recouvrement.services import (
+    generer_leases_pour_regle,
+    normaliser_limite_generation,
+)
 
-logger = logging.getLogger(__name__)
-
-# --- Place la fonction calculer_prochaine_date_valide ICI ---
-def calculer_prochaine_date_valide(date_actuelle, frequence, jours_repos):
-    if frequence == 'JOURNALIER':
-        nouvelle_date = date_actuelle + timedelta(days=1)
-    elif frequence == 'HEBDOMADAIRE':
-        nouvelle_date = date_actuelle + timedelta(weeks=1)
-    elif frequence == 'MENSUEL':
-        nouvelle_date = date_actuelle + relativedelta(months=1)
-    else:
-        nouvelle_date = date_actuelle + timedelta(days=1)
-
-    if len(jours_repos) >= 7:
-        return nouvelle_date
-
-    while nouvelle_date.weekday() in jours_repos:
-        nouvelle_date += timedelta(days=1)
-
-    return nouvelle_date
 
 class Command(BaseCommand):
-    help = "Génère les échéances (Leases) pour tous les contrats actifs avec logique de rattrapage et sauts de jours de repos."
+    help = (
+        "Génère les leases exigibles à partir des règles de génération. "
+        "Sans limite, l'instant courant est utilisé."
+    )
 
     def add_arguments(self, parser):
         parser.add_argument(
+            '--regle',
+            type=int,
+            help=(
+                "ID de la règle à traiter. Si absent, toutes les règles "
+                "actives sont traitées."
+            ),
+        )
+        groupe_limite = parser.add_mutually_exclusive_group()
+        groupe_limite.add_argument(
+            '--jusqua',
+            type=str,
+            help=(
+                "Datetime limite ISO 8601 inclusif, par exemple "
+                "2026-07-29T22:00:00. Sans fuseau, le fuseau Django est utilisé."
+            ),
+        )
+        groupe_limite.add_argument(
             '--date',
             type=str,
-            help='Spécifiez une date cible au format YYYY-MM-DD. Si ignoré, utilise la date du jour.',
+            help=(
+                "Compatibilité avec l'ancienne commande : date YYYY-MM-DD "
+                "interprétée jusqu'à 23:59:59.999999."
+            ),
         )
 
     def handle(self, *args, **options):
-        # 1. GESTION DE LA DATE CIBLE
-        date_param = options.get('date')
-        if date_param:
-            try:
-                date_cible = datetime.strptime(date_param, '%Y-%m-%d').date()
-            except ValueError:
-                self.stdout.write(self.style.ERROR("Erreur : Le format de la date doit être YYYY-MM-DD"))
-                return
-        else:
-            date_cible = date.today()
+        try:
+            if options.get('jusqua'):
+                limite = normaliser_limite_generation(options['jusqua'])
+            elif options.get('date'):
+                limite = normaliser_limite_generation(
+                    options['date'],
+                    fin_de_jour=True,
+                )
+            else:
+                limite = normaliser_limite_generation()
+        except (TypeError, ValueError) as exc:
+            raise CommandError(str(exc)) from exc
 
-        self.stdout.write(self.style.WARNING(f"--- Début de la génération des Leases pour le {date_cible} ---"))
+        regle_id = options.get('regle')
+        regles = RegleGenerationLease.objects.filter(actif=True)
 
-        # 🚀 OPTIMISATION : On charge tous les paramètres de toutes les agences en UNE FOIS
-        tous_les_parametres = Parametre.objects.all()
-        config_par_compte = {param.compte_id: param.jours_repos for param in tous_les_parametres}
+        if regle_id is not None:
+            regles = regles.filter(pk=regle_id)
+            if not regles.exists():
+                raise CommandError(
+                    f"La règle active d'ID {regle_id} est introuvable."
+                )
 
-        # 2. RECHERCHE DES CONTRATS
-        contrats_actifs = Contrat.objects.filter(
-            statut=Contrat.STATUT_ACTIF,
-            prochaine_echeance__lte=date_cible
+        regle_ids = list(regles.order_by('id').values_list('id', flat=True))
+        if not regle_ids:
+            self.stdout.write(
+                self.style.WARNING("Aucune règle de génération active.")
+            )
+            return
+
+        self.stdout.write(
+            self.style.WARNING(
+                f"--- Génération des leases jusqu'au {limite.isoformat()} ---"
+            )
         )
 
-        total_contrats = contrats_actifs.count()
-        self.stdout.write(f"{total_contrats} contrats à traiter trouvés.")
+        totaux = {
+            'contrats_cibles': 0,
+            'leases_crees': 0,
+            'doublons_ignores': 0,
+            'occurrences_repos_ignorees': 0,
+            'contrats_termines': 0,
+            'erreurs': 0,
+        }
 
-        crees = 0
-        erreurs_ou_doublons = 0
-
-        for contrat in contrats_actifs:
+        for identifiant in regle_ids:
             try:
-                with transaction.atomic():
-                    # On récupère la config du compte. Par défaut, si l'entreprise
-                    # n'a pas configuré ses paramètres, la liste est vide [] (on ne saute aucun jour)
-                    jours_repos = config_par_compte.get(contrat.compte_id, [])
+                resultat = generer_leases_pour_regle(
+                    regle_id=identifiant,
+                    jusqu_a=limite,
+                )
+            except RegleGenerationLease.DoesNotExist:
+                # La règle a pu être supprimée entre la sélection et le traitement.
+                self.stderr.write(
+                    self.style.WARNING(
+                        f"Règle {identifiant} supprimée avant son traitement."
+                    )
+                )
+                continue
 
-                    # 🔄 LA BOUCLE DE RATTRAPAGE
-                    while contrat.prochaine_echeance and contrat.prochaine_echeance <= date_cible:
+            for cle in totaux:
+                totaux[cle] += resultat[cle]
 
-                        lease, created = Lease.objects.get_or_create(
-                            contrat=contrat,
-                            date_echeance=contrat.prochaine_echeance,
-                            compte_id=contrat.compte_id,
-                            defaults={
-                                'montant_attendu': contrat.montant_par_paiement,
-                                'statut': Lease.STATUT_NON_PAYE
-                            }
-                        )
+            self.stdout.write(
+                f"Règle #{identifiant} « {resultat['regle']} » : "
+                f"{resultat['leases_crees']} créé(s), "
+                f"{resultat['doublons_ignores']} doublon(s), "
+                f"{resultat['occurrences_repos_ignorees']} repos ignoré(s), "
+                f"{resultat['erreurs']} erreur(s)."
+            )
 
-                        if created:
-                            crees += 1
-                        else:
-                            erreurs_ou_doublons += 1
-
-                        # 🚀 AVANCEMENT INTELLIGENT DE L'HORLOGE
-                        contrat.prochaine_echeance = calculer_prochaine_date_valide(
-                            date_actuelle=contrat.prochaine_echeance,
-                            frequence=contrat.frequence,
-                            jours_repos=jours_repos
-                        )
-
-                    # SAUVEGARDE DE LA NOUVELLE DATE
-                    contrat.save(update_fields=['prochaine_echeance'])
-
-            except Exception as e:
-                erreurs_ou_doublons += 1
-                logger.error(f"Erreur lors de la génération du lease pour le contrat {contrat.id}: {str(e)}")
-
-        self.stdout.write(self.style.SUCCESS(
-            f"--- Terminé ! {crees} Leases créés, {erreurs_ou_doublons} ignorés (doublons/erreurs). ---"
-        ))
+        style = self.style.ERROR if totaux['erreurs'] else self.style.SUCCESS
+        self.stdout.write(
+            style(
+                "--- Terminé : "
+                f"{totaux['leases_crees']} lease(s) créé(s), "
+                f"{totaux['doublons_ignores']} doublon(s) ignoré(s), "
+                f"{totaux['occurrences_repos_ignorees']} occurrence(s) de repos, "
+                f"{totaux['contrats_termines']} contrat(s) sans prochaine occurrence, "
+                f"{totaux['erreurs']} erreur(s). ---"
+            )
+        )

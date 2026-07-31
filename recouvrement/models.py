@@ -135,7 +135,7 @@ class Contrat(BaseModel):
     frequence = models.CharField(max_length=50,choices=FREQUENCE_CHOICES, default=JOURNALIER)
     date_debut = models.DateField()
     date_fin = models.DateField()
-    prochaine_echeance = models.DateTimeField()
+    prochaine_echeance = models.DateTimeField(null=True, blank=True)
 
     statut = models.CharField(max_length=20, choices=STATUT_CHOICES, default=STATUT_ACTIF)
 
@@ -337,7 +337,7 @@ class Lease(BaseModel):
         help_text="Le contrat auquel cette échéance journalière est rattachée."
     )
 
-    date_echeance = models.DateField(db_index=True)
+    date_echeance = models.DateTimeField(db_index=True)
 
     montant_attendu = models.DecimalField(max_digits=12, decimal_places=2)
 
@@ -682,7 +682,7 @@ class RegleGenerationLease(BaseModel):
     Une règle peut être appliquée à une infinité de contrats.
     """
     nom = models.CharField(
-        max_length=100, unique=True,
+        max_length=100,
         help_text="Ex: 'Classique 24h', 'Demi-journée 12h/22h', 'Hebdomadaire'..."
     )
 
@@ -726,6 +726,12 @@ class RegleGenerationLease(BaseModel):
         db_table = "rc_regle_generation_lease"
         verbose_name = "Règle de génération de leases"
         verbose_name_plural = "Règles de génération de leases"
+        constraints = [
+            models.UniqueConstraint(
+                fields=['compte_id', 'nom'],
+                name='unique_regle_generation_nom_par_compte',
+            ),
+        ]
         indexes = [
             models.Index(fields=['frequence'], name='idx_regle_lease_freq'),
             GinIndex(fields=['nom_search'], name='idx_lease_nom_search_trgm', opclasses=['gin_trgm_ops']),

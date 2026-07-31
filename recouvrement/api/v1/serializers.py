@@ -1,5 +1,6 @@
 import re
 from collections import defaultdict
+from croniter import croniter
 from django.db import transaction
 from django.utils import timezone
 from rest_framework import serializers
@@ -715,6 +716,28 @@ class RegleGenerationLeaseSerializer(serializers.ModelSerializer):
                 "Utilisez uniquement des lettres, chiffres, espaces et tirets."
             )
 
+        request = self.context.get('request')
+        compte_id = getattr(self.instance, 'compte_id', None)
+        if request and getattr(request, 'user', None):
+            if request.user.is_superuser:
+                compte_id = request.data.get('compte_id', compte_id)
+            else:
+                compte_id = request.user.compte_id
+
+        if compte_id is not None:
+            regles_du_compte = RegleGenerationLease.objects.filter(
+                compte_id=compte_id,
+                nom__iexact=nom_nettoye,
+            )
+            if self.instance:
+                regles_du_compte = regles_du_compte.exclude(
+                    pk=self.instance.pk
+                )
+            if regles_du_compte.exists():
+                raise serializers.ValidationError(
+                    "Une règle portant ce nom existe déjà pour ce compte."
+                )
+
         return nom_nettoye
 
     def validate_cron_expression(self, value):
@@ -723,13 +746,15 @@ class RegleGenerationLeaseSerializer(serializers.ModelSerializer):
         Exemples valides : "* * * * *", "0 14,16 * * *", "*/15 * * * 1-5"
         """
         if value:
-            # Cette Regex vérifie qu'il y a exactement 5 blocs séparés par des espaces.
-            cron_regex = r'^(\*|[0-5]?\d)([\/\,\-][0-5]?\d)* (\*|[0-2]?\d)([\/\,\-][0-2]?\d)* (\*|[0-3]?\d)([\/\,\-][0-3]?\d)* (\*|[0-1]?\d)([\/\,\-][0-1]?\d)* (\*|[0-7])([\/\,\-][0-7])*$'
-
-            if not re.match(cron_regex, value.strip()):
+            expression = value.strip()
+            if (
+                len(expression.split()) != 5
+                or not croniter.is_valid(expression)
+            ):
                 raise serializers.ValidationError(
                     "Format Cron invalide. L'expression doit contenir 5 parties (ex: '0 12,22 * * *')."
                 )
+            return expression
         return value
 
     def validate(self, data):

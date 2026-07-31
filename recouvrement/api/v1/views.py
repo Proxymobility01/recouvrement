@@ -140,7 +140,7 @@ class ContratViewSet(TenantModelViewSet):
         statuts_impayes = [Lease.STATUT_NON_PAYE, Lease.STATUT_PARTIEL]
 
         leases_impayes = Lease.objects.filter(
-            date_echeance=aujourdhui,
+            date_echeance__date=aujourdhui,
             statut__in=statuts_impayes
         )
 

@@ -1,10 +1,15 @@
 import logging
 from collections import defaultdict
-from datetime import timedelta
+from datetime import date, datetime, time, timedelta
 
 import requests
+from croniter import croniter
 from django.core.cache import cache
 from django.db import transaction
+from django.utils import timezone
+from django.utils.dateparse import parse_date, parse_datetime
+from django_q.models import Schedule
+from dateutil.relativedelta import relativedelta
 
 from accounts.models import ConfigPaiement
 from core.errors import ErrorCodes
@@ -16,6 +21,382 @@ logger = logging.getLogger(__name__)
 
 class AnnulationLeaseError(Exception):
     """Échéance non annulable (déjà payée, partiellement payée ou déjà annulée)."""
+
+
+class LeaseGenerationConfigurationError(Exception):
+    """Configuration invalide d'une règle de génération de leases."""
+
+
+def normaliser_limite_generation(valeur=None, fin_de_jour=False):
+    """
+    Retourne une limite timezone-aware.
+
+    - ``None`` utilise l'instant courant.
+    - un datetime ISO conserve son heure ;
+    - une date ISO est interprétée à minuit ou à la fin de la journée.
+    """
+    if valeur is None:
+        limite = timezone.now()
+    elif isinstance(valeur, datetime):
+        limite = valeur
+    elif isinstance(valeur, date):
+        limite = datetime.combine(valeur, time.max if fin_de_jour else time.min)
+    elif isinstance(valeur, str):
+        limite = parse_datetime(valeur)
+        if limite is None:
+            date_parsee = parse_date(valeur)
+            if date_parsee is None:
+                raise ValueError(
+                    "Date invalide. Utilisez YYYY-MM-DD ou un datetime ISO 8601."
+                )
+            limite = datetime.combine(
+                date_parsee,
+                time.max if fin_de_jour else time.min,
+            )
+    else:
+        raise TypeError("La limite doit être une date, un datetime, une chaîne ISO ou None.")
+
+    if timezone.is_naive(limite):
+        limite = timezone.make_aware(limite, timezone.get_current_timezone())
+    return limite
+
+
+def calculer_prochaine_occurrence(regle, occurrence):
+    """
+    Calcule l'occurrence qui suit ``occurrence`` à partir de la règle métier.
+
+    Le calcul part toujours de l'occurrence planifiée, et non de l'heure réelle
+    d'exécution du worker. Une tâche retardée ne décale donc jamais la cadence.
+    """
+    occurrence = normaliser_limite_generation(occurrence)
+    occurrence_locale = timezone.localtime(
+        occurrence,
+        timezone.get_current_timezone(),
+    )
+
+    if regle.frequence == Schedule.ONCE:
+        return None
+    if regle.frequence == Schedule.HOURLY:
+        suivante = occurrence_locale + timedelta(hours=1)
+    elif regle.frequence == Schedule.DAILY:
+        suivante = occurrence_locale + timedelta(days=1)
+    elif regle.frequence == Schedule.WEEKLY:
+        suivante = occurrence_locale + timedelta(weeks=1)
+    elif regle.frequence == Schedule.MONTHLY:
+        suivante = occurrence_locale + relativedelta(months=1)
+    elif regle.frequence == Schedule.CRON:
+        if not regle.cron_expression:
+            raise LeaseGenerationConfigurationError(
+                f"La règle {regle.id} est de type CRON sans expression Cron."
+            )
+        try:
+            suivante = croniter(
+                regle.cron_expression,
+                occurrence_locale,
+            ).get_next(datetime)
+        except (ValueError, KeyError) as exc:
+            raise LeaseGenerationConfigurationError(
+                f"Expression Cron invalide pour la règle {regle.id}: "
+                f"{regle.cron_expression}"
+            ) from exc
+    else:
+        raise LeaseGenerationConfigurationError(
+            f"Fréquence inconnue pour la règle {regle.id}: {regle.frequence}"
+        )
+
+    suivante = normaliser_limite_generation(suivante)
+    if suivante <= occurrence:
+        raise LeaseGenerationConfigurationError(
+            f"La règle {regle.id} ne produit pas une occurrence strictement future."
+        )
+    return suivante
+
+
+def _normaliser_jours_repos(jours_repos):
+    jours = {
+        int(jour)
+        for jour in (jours_repos or [])
+        if str(jour).lstrip('-').isdigit() and 0 <= int(jour) <= 6
+    }
+    # Même garde que l'ancienne commande : une semaine entièrement chômée
+    # ne doit pas provoquer une boucle sans fin.
+    return set() if len(jours) >= 7 else jours
+
+
+def generer_leases_pour_regle(regle_id, jusqu_a=None):
+    """
+    Génère, de façon idempotente, toutes les occurrences exigibles d'une règle.
+
+    Cette fonction est l'unique moteur métier partagé par la commande manuelle
+    et par Django Q2. Le ``next_run`` de Q2 déclenche le contrôle ; le curseur
+    ``Contrat.prochaine_echeance`` autorise réellement chaque création.
+    """
+    from .models import Contrat, Lease, Parametre, RegleGenerationLease
+
+    limite = normaliser_limite_generation(jusqu_a)
+    regle = RegleGenerationLease.objects.get(pk=regle_id)
+
+    resultat = {
+        'regle_id': regle.id,
+        'regle': regle.nom,
+        'jusqu_a': limite.isoformat(),
+        'contrats_cibles': 0,
+        'leases_crees': 0,
+        'doublons_ignores': 0,
+        'occurrences_repos_ignorees': 0,
+        'contrats_termines': 0,
+        'erreurs': 0,
+    }
+
+    if not regle.actif:
+        logger.info(
+            "[Génération leases] Règle %s inactive : aucun traitement.",
+            regle.id,
+        )
+        return resultat
+
+    jours_repos = _normaliser_jours_repos(
+        Parametre.objects.filter(compte_id=regle.compte_id)
+        .values_list('jours_repos', flat=True)
+        .first()
+    )
+
+    contrat_ids = list(
+        Contrat.objects.filter(
+            compte_id=regle.compte_id,
+            regle_generation_id=regle.id,
+            statut=Contrat.STATUT_ACTIF,
+            prochaine_echeance__isnull=False,
+            prochaine_echeance__lte=limite,
+        ).values_list('id', flat=True)
+    )
+    resultat['contrats_cibles'] = len(contrat_ids)
+
+    for contrat_id in contrat_ids:
+        compteurs_contrat = {
+            'leases_crees': 0,
+            'doublons_ignores': 0,
+            'occurrences_repos_ignorees': 0,
+            'contrats_termines': 0,
+        }
+
+        try:
+            with transaction.atomic():
+                contrat = (
+                    Contrat.objects.select_for_update()
+                    .select_related('regle_generation')
+                    .get(
+                        pk=contrat_id,
+                        compte_id=regle.compte_id,
+                        regle_generation_id=regle.id,
+                        statut=Contrat.STATUT_ACTIF,
+                    )
+                )
+
+                # Un autre worker ou la commande a pu faire avancer le curseur
+                # pendant que ce worker attendait le verrou.
+                while contrat.prochaine_echeance:
+                    occurrence = normaliser_limite_generation(
+                        contrat.prochaine_echeance
+                    )
+                    if occurrence > limite:
+                        break
+
+                    occurrence_locale = timezone.localtime(
+                        occurrence,
+                        timezone.get_current_timezone(),
+                    )
+
+                    if (
+                        contrat.date_fin
+                        and occurrence_locale.date() > contrat.date_fin
+                    ):
+                        contrat.prochaine_echeance = None
+                        compteurs_contrat['contrats_termines'] = 1
+                        break
+
+                    occurrence_suivante = calculer_prochaine_occurrence(
+                        regle,
+                        occurrence,
+                    )
+
+                    if occurrence_locale.weekday() in jours_repos:
+                        compteurs_contrat['occurrences_repos_ignorees'] += 1
+                    else:
+                        _, created = Lease.objects.get_or_create(
+                            contrat=contrat,
+                            date_echeance=occurrence,
+                            defaults={
+                                'compte_id': contrat.compte_id,
+                                'montant_attendu': contrat.montant_par_paiement,
+                                'statut': Lease.STATUT_NON_PAYE,
+                            },
+                        )
+                        compteur = (
+                            'leases_crees'
+                            if created
+                            else 'doublons_ignores'
+                        )
+                        compteurs_contrat[compteur] += 1
+
+                    contrat.prochaine_echeance = occurrence_suivante
+                    if occurrence_suivante is None:
+                        compteurs_contrat['contrats_termines'] = 1
+                        break
+
+                contrat.save(
+                    update_fields=['prochaine_echeance', 'updated_at']
+                )
+
+        except Contrat.DoesNotExist:
+            # État modifié par une autre transaction : ce n'est pas une erreur.
+            logger.info(
+                "[Génération leases] Contrat %s devenu inéligible.",
+                contrat_id,
+            )
+            continue
+        except Exception:
+            resultat['erreurs'] += 1
+            logger.exception(
+                "[Génération leases] Échec pour le contrat %s et la règle %s.",
+                contrat_id,
+                regle.id,
+            )
+            continue
+
+        for cle, valeur in compteurs_contrat.items():
+            resultat[cle] += valeur
+
+    logger.info(
+        "[Génération leases] Règle %s terminée : %s créés, %s doublons, "
+        "%s repos ignorés, %s erreurs.",
+        regle.id,
+        resultat['leases_crees'],
+        resultat['doublons_ignores'],
+        resultat['occurrences_repos_ignorees'],
+        resultat['erreurs'],
+    )
+    return resultat
+
+
+def assurer_lease_suivant_du_lease(lease_source_id):
+    """
+    S'assure que l'occurrence suivant un lease Mobile Money payé existe.
+
+    Le paiement et la tâche planifiée peuvent appeler cette logique en
+    concurrence : le verrou du contrat et la contrainte d'unicité du lease
+    garantissent qu'ils visent la même occurrence sans créer la suivante.
+    """
+    from .models import Contrat, Lease, Parametre
+
+    def ignorer(raison):
+        return {
+            'statut': 'IGNORE',
+            'raison': raison,
+            'lease_id': None,
+            'lease_cree': False,
+        }
+
+    with transaction.atomic():
+        lease_source = (
+            Lease.objects.select_for_update()
+            .get(pk=lease_source_id)
+        )
+        contrat = (
+            Contrat.objects.select_for_update()
+            .get(pk=lease_source.contrat_id)
+        )
+
+        if lease_source.compte_id != contrat.compte_id:
+            return ignorer('INCOHERENCE_COMPTE')
+        if lease_source.statut != Lease.STATUT_PAYE:
+            return ignorer('LEASE_SOURCE_NON_PAYE')
+        if (
+            contrat.statut != Contrat.STATUT_ACTIF
+            or contrat.montant_restant <= 0
+        ):
+            return ignorer('CONTRAT_NON_ACTIF_OU_SOLDE')
+
+        regle = contrat.regle_generation
+        if regle is None:
+            return ignorer('REGLE_GENERATION_ABSENTE')
+        if not regle.actif:
+            return ignorer('REGLE_GENERATION_INACTIVE')
+        if regle.compte_id != contrat.compte_id:
+            return ignorer('REGLE_GENERATION_AUTRE_COMPTE')
+        if contrat.prochaine_echeance is None:
+            return ignorer('PROCHAINE_ECHEANCE_ABSENTE')
+
+        jours_repos = _normaliser_jours_repos(
+            Parametre.objects.filter(compte_id=contrat.compte_id)
+            .values_list('jours_repos', flat=True)
+            .first()
+        )
+
+        occurrence = calculer_prochaine_occurrence(
+            regle,
+            lease_source.date_echeance,
+        )
+        occurrences_couvertes = []
+
+        while occurrence:
+            occurrences_couvertes.append(occurrence)
+            occurrence_locale = timezone.localtime(
+                occurrence,
+                timezone.get_current_timezone(),
+            )
+            if occurrence_locale.weekday() not in jours_repos:
+                break
+            occurrence = calculer_prochaine_occurrence(regle, occurrence)
+
+        if occurrence is None:
+            return ignorer('AUCUNE_OCCURRENCE_SUIVANTE')
+
+        occurrence_locale = timezone.localtime(
+            occurrence,
+            timezone.get_current_timezone(),
+        )
+        if contrat.date_fin and occurrence_locale.date() > contrat.date_fin:
+            if (
+                contrat.prochaine_echeance
+                and normaliser_limite_generation(contrat.prochaine_echeance)
+                in occurrences_couvertes
+            ):
+                contrat.prochaine_echeance = None
+                contrat.save(
+                    update_fields=['prochaine_echeance', 'updated_at']
+                )
+            return ignorer('DATE_FIN_DEPASSEE')
+
+        lease_suivant, lease_cree = Lease.objects.get_or_create(
+            contrat=contrat,
+            date_echeance=occurrence,
+            defaults={
+                'compte_id': contrat.compte_id,
+                'montant_attendu': contrat.montant_par_paiement,
+                'statut': Lease.STATUT_NON_PAYE,
+            },
+        )
+
+        if contrat.prochaine_echeance:
+            curseur = normaliser_limite_generation(
+                contrat.prochaine_echeance
+            )
+            if curseur in occurrences_couvertes:
+                contrat.prochaine_echeance = calculer_prochaine_occurrence(
+                    regle,
+                    occurrence,
+                )
+                contrat.save(
+                    update_fields=['prochaine_echeance', 'updated_at']
+                )
+
+        return {
+            'statut': 'CREE' if lease_cree else 'EXISTANT',
+            'raison': '',
+            'lease_id': lease_suivant.id,
+            'lease_cree': lease_cree,
+        }
 
 
 def annuler_leases_et_prolonger(leases, jours_a_prolonger):

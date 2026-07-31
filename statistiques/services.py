@@ -16,14 +16,14 @@ def statistiques_du_jour(date_cible=None):
     # Ainsi, même si un contrat a été suspendu ou soldé dans la journée,
     # ses échéances d'aujourd'hui seront bien prises en compte.
     comptes_concernes = Lease.objects.filter(
-        date_echeance=date_cible
+        date_echeance__date=date_cible
     ).values_list('compte_id', flat=True).distinct()
 
     for compte_id in comptes_concernes:
         # Cible les échéances du compte pour la journée
         leases_du_jour = Lease.objects.filter(
             compte_id=compte_id,
-            date_echeance=date_cible
+            date_echeance__date=date_cible
         )
 
         # --- FINANCES ---

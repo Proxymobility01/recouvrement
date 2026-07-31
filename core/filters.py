@@ -15,9 +15,9 @@ class LeaseFilter(filters.FilterSet):
     # ==========================================
     # FILTRES SUR LA DATE D'ÉCHÉANCE (DateField)
     # ==========================================
-    date_echeance_start = filters.DateFilter(field_name="date_echeance", lookup_expr='gte', distinct=True)
-    date_echeance_end = filters.DateFilter(field_name="date_echeance", lookup_expr='lte', distinct=True)
-    date_echeance = filters.DateFilter(field_name="date_echeance", lookup_expr='exact', distinct=True)
+    date_echeance_start = filters.DateFilter(field_name="date_echeance__date", lookup_expr='gte', distinct=True)
+    date_echeance_end = filters.DateFilter(field_name="date_echeance__date", lookup_expr='lte', distinct=True)
+    date_echeance = filters.DateFilter(field_name="date_echeance__date", lookup_expr='exact', distinct=True)
 
     # ==========================================
     # FILTRES SUR LA DATE DE CRÉATION (DateTimeField -> Date)
@@ -51,8 +51,8 @@ class ContratFilter(filters.FilterSet):
     date_fin_end = filters.DateFilter(field_name="date_fin", lookup_expr='lte')
 
     # Prochaine échéance
-    prochaine_echeance_start = filters.DateFilter(field_name="prochaine_echeance", lookup_expr='gte')
-    prochaine_echeance_end = filters.DateFilter(field_name="prochaine_echeance", lookup_expr='lte')
+    prochaine_echeance_start = filters.DateFilter(field_name="prochaine_echeance__date", lookup_expr='gte')
+    prochaine_echeance_end = filters.DateFilter(field_name="prochaine_echeance__date", lookup_expr='lte')
 
     # ==========================================
     # 3. FILTRES FINANCIERS (Bonus recommandé)

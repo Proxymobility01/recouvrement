@@ -1,5 +1,5 @@
 import logging
-from django.db.models.signals import post_save, post_delete
+from django.db.models.signals import post_save, post_delete, pre_save
 from django.dispatch import receiver
 from django_q.models import Schedule
 from .models import ReglePenalite, RegleGenerationLease
@@ -56,6 +56,44 @@ def nettoyer_schedule_lors_de_la_suppression(sender, instance, **kwargs):
         logger.info(f"🗑️ [Django-Q] Tâche fantôme '{nom_tache}' supprimée suite à la destruction de la règle.")
 
 
+@receiver(pre_save, sender=RegleGenerationLease)
+def detecter_modification_planification_generation_lease(
+    sender,
+    instance,
+    **kwargs,
+):
+    """
+    Mémorise si la planification a réellement changé.
+
+    Une modification purement descriptive (par exemple le nom) ne doit pas
+    replacer ``next_run`` à la date de début et provoquer un rattrapage
+    involontaire.
+    """
+    if not instance.pk:
+        instance._planification_modifiee = True
+        return
+
+    ancienne_planification = (
+        sender.objects
+        .filter(pk=instance.pk)
+        .values('frequence', 'cron_expression', 'debut', 'actif')
+        .first()
+    )
+    if ancienne_planification is None:
+        instance._planification_modifiee = True
+        return
+
+    instance._planification_modifiee = any(
+        ancienne_planification[champ] != getattr(instance, champ)
+        for champ in (
+            'frequence',
+            'cron_expression',
+            'debut',
+            'actif',
+        )
+    )
+
+
 @receiver(post_save, sender=RegleGenerationLease)
 def synchroniser_schedule_generation_lease(sender, instance, created, **kwargs):
     """
@@ -70,25 +108,45 @@ def synchroniser_schedule_generation_lease(sender, instance, created, **kwargs):
             logger.info(f"Règle de génération '{instance.nom}' désactivée. Tâche supprimée.")
             return
 
+        schedule_existe = Schedule.objects.filter(name=nom_tache).exists()
+
         # 2. Configuration des paramètres de la tâche
         schedule_kwargs = {
             'func': 'core.tasks.generer_leases_task',
             'kwargs': {'regle_id': instance.id},
             'schedule_type': instance.frequence,
-            'repeats': -1,
-            'next_run': instance.debut,
+            'repeats': 1 if instance.frequence == Schedule.ONCE else -1,
+            'cron': (
+                instance.cron_expression
+                if instance.frequence == Schedule.CRON
+                else None
+            ),
         }
 
-        # 3. Ajout de l'expression CRON si applicable
-        if instance.frequence == Schedule.CRON and instance.cron_expression:
-            schedule_kwargs['cron'] = instance.cron_expression
+        planification_a_reinitialiser = (
+            created
+            or not schedule_existe
+            or getattr(instance, '_planification_modifiee', False)
+        )
+        if planification_a_reinitialiser:
+            schedule_kwargs['next_run'] = instance.debut
 
-        # 4. Enregistrement en base de données
+        # 3. Enregistrement en base de données
         with db_transaction.atomic():
-            Schedule.objects.update_or_create(
+            schedule, _ = Schedule.objects.update_or_create(
                 name=nom_tache,
                 defaults=schedule_kwargs,
             )
+            # À la création d'un CRON, Schedule.save() recalcule next_run
+            # depuis l'instant présent. On restaure donc explicitement la
+            # première exécution choisie sur la règle.
+            if (
+                planification_a_reinitialiser
+                and schedule.next_run != instance.debut
+            ):
+                Schedule.objects.filter(pk=schedule.pk).update(
+                    next_run=instance.debut,
+                )
         logger.info(f"Tâche planifiée/mise à jour pour la règle '{instance.nom}'.")
 
     except Exception as e:

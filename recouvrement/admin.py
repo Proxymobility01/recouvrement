@@ -3,9 +3,12 @@ import datetime
 from django import forms
 from django.contrib import admin, messages
 from django.contrib.admin.helpers import ACTION_CHECKBOX_NAME
+from django.db.models import Count
 from django.shortcuts import render
 from django.utils import timezone
 from django.utils.html import format_html
+from django_q.models import Schedule
+from croniter import croniter
 from rangefilter.filters import DateRangeFilter, DateRangeQuickSelectListFilter
 from .services import annuler_leases_et_prolonger, AnnulationLeaseError
 from .models import (
@@ -16,7 +19,8 @@ from .models import (
     Paiement,
     Parametre,
     ReglePenalite,
-    Penalite
+    Penalite,
+    RegleGenerationLease,
 )
 
 
@@ -72,6 +76,80 @@ class AnnulerLeasesForm(forms.Form):
     )
 
 
+class ContratAdminForm(forms.ModelForm):
+    class Meta:
+        model = Contrat
+        fields = '__all__'
+
+    def clean(self):
+        cleaned_data = super().clean()
+        compte_id = cleaned_data.get('compte_id')
+        regle_generation = cleaned_data.get('regle_generation')
+
+        if (
+            compte_id is not None
+            and regle_generation is not None
+            and regle_generation.compte_id != compte_id
+        ):
+            self.add_error(
+                'regle_generation',
+                "La règle de génération doit appartenir au même compte "
+                "que le contrat.",
+            )
+
+        return cleaned_data
+
+
+class RegleGenerationLeaseAdminForm(forms.ModelForm):
+    class Meta:
+        model = RegleGenerationLease
+        fields = '__all__'
+
+    def clean(self):
+        cleaned_data = super().clean()
+        compte_id = cleaned_data.get('compte_id')
+        nom = (cleaned_data.get('nom') or '').strip()
+        frequence = cleaned_data.get('frequence')
+        cron_expression = (cleaned_data.get('cron_expression') or '').strip()
+
+        if compte_id is not None and nom:
+            regles_du_compte = RegleGenerationLease.objects.filter(
+                compte_id=compte_id,
+                nom__iexact=nom,
+            )
+            if self.instance.pk:
+                regles_du_compte = regles_du_compte.exclude(
+                    pk=self.instance.pk
+                )
+            if regles_du_compte.exists():
+                self.add_error(
+                    'nom',
+                    "Une règle portant ce nom existe déjà pour ce compte.",
+                )
+
+        if frequence == Schedule.CRON:
+            if not cron_expression:
+                self.add_error(
+                    'cron_expression',
+                    "L'expression CRON est obligatoire pour cette fréquence.",
+                )
+            elif (
+                len(cron_expression.split()) != 5
+                or not croniter.is_valid(cron_expression)
+            ):
+                self.add_error(
+                    'cron_expression',
+                    "Expression CRON invalide. Utilisez cinq champs, par "
+                    "exemple : 0 12,22 * * *.",
+                )
+            else:
+                cleaned_data['cron_expression'] = cron_expression
+        else:
+            cleaned_data['cron_expression'] = None
+
+        return cleaned_data
+
+
 # ==========================================
 # 2. CONFIGURATION DES ADMINS
 # ==========================================
@@ -87,18 +165,48 @@ class TypeContratAdmin(admin.ModelAdmin):
 
 @admin.register(Contrat)
 class ContratAdmin(admin.ModelAdmin):
-    list_display = ('id_reference', 'nom_complet', 'type_contrat', 'statut', 'montant_total','montant_paye', 'montant_restant',
-                    'date_debut', 'date_fin', 'prochaine_echeance', 'created_at', 'compte_id')
+    form = ContratAdminForm
+    list_display = (
+        'id_reference',
+        'nom_complet',
+        'type_contrat',
+        'statut',
+        'regle_generation',
+        'montant_total',
+        'montant_paye',
+        'montant_restant',
+        'date_debut',
+        'date_fin',
+        'prochaine_echeance',
+        'created_at',
+        'compte_id',
+    )
+    list_select_related = (
+        'type_contrat',
+        'regle_generation',
+        'regle_penalite',
+    )
     list_filter = (
         ('created_at', DateRangeAvecHierFilter),
         ('prochaine_echeance', DateRangeAvecHierFilter),
-        'statut', 'frequence', 'type_contrat', 'compte_id', 'regle_penalite',
+        'statut',
+        'frequence',
+        'type_contrat',
+        'compte_id',
+        'regle_generation',
+        'regle_penalite',
     )
     search_fields = ('reference', 'nom_complet', 'immatriculation', 'vin', 'chauffeur__email')
     date_hierarchy = 'created_at'
 
     # 🚀 raw_id_fields : Indispensable pour ne pas faire crasher la page s'il y a 10 000 chauffeurs
-    raw_id_fields = ('chauffeur', 'enregistre_par', 'parent', 'regle_penalite')
+    raw_id_fields = (
+        'chauffeur',
+        'enregistre_par',
+        'parent',
+        'regle_generation',
+        'regle_penalite',
+    )
 
     # On bloque la modification manuelle des champs générés/calculés
     readonly_fields = ('reference', 'nom_complet_search', 'created_at', 'updated_at')
@@ -123,7 +231,7 @@ class ContratAdmin(admin.ModelAdmin):
         }),
         ('Finances & Échéancier', {
             'fields': ('montant_total', 'montant_restant', 'montant_paye', 'montant_par_paiement', 'frequence',
-                       'regle_penalite')
+                       'regle_generation', 'regle_penalite')
         }),
         ('Dates', {
             'fields': ('date_debut', 'date_fin', 'prochaine_echeance', 'created_at', 'updated_at')
@@ -283,6 +391,65 @@ class ReglePenaliteAdmin(admin.ModelAdmin):
             'fields': ('created_at', 'updated_at')
         }),
     )
+
+
+@admin.register(RegleGenerationLease)
+class RegleGenerationLeaseAdmin(admin.ModelAdmin):
+    form = RegleGenerationLeaseAdminForm
+    list_display = (
+        'nom',
+        'compte_id',
+        'frequence',
+        'cron_expression',
+        'debut',
+        'actif',
+        'nombre_contrats',
+        'created_at',
+    )
+    list_filter = (
+        'actif',
+        'frequence',
+        'compte_id',
+        ('debut', DateRangeAvecHierFilter),
+        ('created_at', DateRangeAvecHierFilter),
+    )
+    search_fields = (
+        'nom',
+        'nom_search',
+    )
+    readonly_fields = (
+        'nom_search',
+        'created_at',
+        'updated_at',
+    )
+    ordering = ('-created_at',)
+    date_hierarchy = 'created_at'
+
+    fieldsets = (
+        ('Identification', {
+            'fields': ('compte_id', 'nom', 'nom_search', 'actif')
+        }),
+        ('Planification', {
+            'fields': ('frequence', 'cron_expression', 'debut')
+        }),
+        ('Dates système', {
+            'fields': ('created_at', 'updated_at')
+        }),
+    )
+
+    def get_queryset(self, request):
+        return (
+            super()
+            .get_queryset(request)
+            .annotate(_nombre_contrats=Count('contrats'))
+        )
+
+    @admin.display(
+        description='Contrats',
+        ordering='_nombre_contrats',
+    )
+    def nombre_contrats(self, obj):
+        return obj._nombre_contrats
 
 
 @admin.register(Penalite)

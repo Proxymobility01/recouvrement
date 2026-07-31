@@ -3,7 +3,6 @@ from collections import Counter
 from datetime import timedelta
 from decimal import Decimal
 
-from django.core.management import call_command
 from django.db import transaction, DatabaseError
 from django.db.models import Count, F
 from django.utils import timezone
@@ -12,8 +11,21 @@ from django_q.tasks import async_task, schedule
 from django_q.models import Schedule
 
 from core.utils import notifier_utilisateur, remove_accents
-from recouvrement.models import SessionPaiement, Paiement, Lease, Contrat, ReglePenalite, Penalite
-from recouvrement.services import PaymentService
+from recouvrement.models import (
+    SessionPaiement,
+    Paiement,
+    Lease,
+    Contrat,
+    ReglePenalite,
+    Penalite,
+    RegleGenerationLease,
+)
+from recouvrement.services import (
+    PaymentService,
+    assurer_lease_suivant_du_lease,
+    generer_leases_pour_regle,
+    normaliser_limite_generation,
+)
 from statistiques.services import statistiques_du_jour
 
 logger = logging.getLogger(__name__)
@@ -30,11 +42,12 @@ def paiement_task(session_id, statut_gateway):
         session = SessionPaiement.objects.select_related('utilisateur').get(id=session_id)
 
         with transaction.atomic():
+            leases_payes_ids = set()
             lignes_paiement = Paiement.objects.select_for_update().filter(
                 session=session,
                 compte_id=session.compte_id,
                 statut=Paiement.STATUT_EN_ATTENTE
-            )
+            ).order_by('id')
 
             # 🚀 CORRECTION 2 : On ne fait plus de "return", on exécute la ventilation
             # UNIQUEMENT s'il y a des lignes. Mais on laissera le code continuer ensuite vers le SSE.
@@ -49,19 +62,68 @@ def paiement_task(session_id, statut_gateway):
                         paiement.date_paiement = session.date_validation or timezone.now()
                         paiement.save()
 
-                        lease = paiement.lease
-                        if lease:
+                        if paiement.lease_id:
+                            lease = (
+                                Lease.objects.select_for_update()
+                                .get(
+                                    pk=paiement.lease_id,
+                                    compte_id=session.compte_id,
+                                )
+                            )
+                            ancien_statut_lease = lease.statut
                             lease.montant_paye += paiement.montant
                             lease.statut = Lease.STATUT_PAYE if lease.montant_paye >= lease.montant_attendu else Lease.STATUT_PARTIEL
                             lease.save()
 
-                            contrat = lease.contrat
+                            contrat = (
+                                Contrat.objects.select_for_update()
+                                .get(
+                                    pk=lease.contrat_id,
+                                    compte_id=session.compte_id,
+                                )
+                            )
                             contrat.montant_restant = max(contrat.montant_restant - paiement.montant, Decimal('0.00'))
                             contrat.montant_paye += paiement.montant
 
                             if contrat.montant_restant == 0:
                                 contrat.statut = Contrat.STATUT_SOLDE
                             contrat.save()
+
+                            if (
+                                paiement.methode == Paiement.METHODE_MOBILE_MONEY
+                                and ancien_statut_lease != Lease.STATUT_PAYE
+                                and lease.statut == Lease.STATUT_PAYE
+                            ):
+                                leases_payes_ids.add(lease.id)
+
+                    leases_payes_ordonnes = (
+                        Lease.objects.filter(id__in=leases_payes_ids)
+                        .order_by('date_echeance', 'id')
+                        .values_list('id', flat=True)
+                    )
+                    for lease_paye_id in leases_payes_ordonnes:
+                        try:
+                            resultat_generation = (
+                                assurer_lease_suivant_du_lease(
+                                    lease_paye_id
+                                )
+                            )
+                            logger.info(
+                                "[PaiementTask] Lease source=%s : "
+                                "génération suivante=%s, lease=%s.",
+                                lease_paye_id,
+                                resultat_generation['statut'],
+                                resultat_generation['lease_id'],
+                            )
+                        except Exception:
+                            # Le paiement Mobile Money reste comptabilisé. La
+                            # règle planifiée pourra générer l'occurrence si
+                            # cette tentative immédiate échoue.
+                            logger.exception(
+                                "[PaiementTask] Échec de la génération "
+                                "suivant le lease payé %s.",
+                                lease_paye_id,
+                            )
 
                     logger.info(f"[PaiementTask] ✅ Ventilation SUCCESS terminée pour {session.reference}.")
 
@@ -231,23 +293,49 @@ def rafraichir_statistiques_horaire_task():
         raise
 
 
-def generer_leases_quotidien_task():
+def generer_leases_task(regle_id, jusqu_a=None):
     """
-    Tâche récurrente lancée tous les jours à 2h00 du matin.
-    Appelle la commande d'administration pour générer les nouvelles échéances.
+    Tâche Q2 appelée par le schedule propre à une RegleGenerationLease.
+
+    ``jusqu_a`` est optionnel et sert surtout aux tests ou aux relances
+    explicites. En fonctionnement normal, l'instant courant est la limite.
     """
-    logger.info("[GenererLeasesQuotidienTask] ⏳ Démarrage de la génération des échéances.")
+    limite = normaliser_limite_generation(jusqu_a)
+    logger.info(
+        "[GenererLeasesTask] Démarrage règle=%s jusqu_a=%s.",
+        regle_id,
+        limite.isoformat(),
+    )
 
     try:
-        # 🚀 Utilisation de call_command en passant le nom du fichier (sans .py)
-        # Remplace 'generer_leases' par le vrai nom de ton fichier dans management/commands/
-        call_command('generer_leases')
-
-        logger.info("[GenererLeasesQuotidienTask] ✅ Génération des échéances terminée avec succès.")
-
+        resultat = generer_leases_pour_regle(
+            regle_id=regle_id,
+            jusqu_a=limite,
+        )
+    except RegleGenerationLease.DoesNotExist:
+        logger.warning(
+            "[GenererLeasesTask] Règle %s introuvable. Tâche ignorée.",
+            regle_id,
+        )
+        return {
+            'regle_id': regle_id,
+            'statut': 'REGLE_INTROUVABLE',
+        }
     except Exception:
-        logger.exception("[GenererLeasesQuotidienTask] ❌ Échec critique lors de la génération des échéances.")
+        logger.exception(
+            "[GenererLeasesTask] Échec critique pour la règle %s.",
+            regle_id,
+        )
         raise
+
+    logger.info(
+        "[GenererLeasesTask] Règle %s terminée : %s lease(s) créé(s), "
+        "%s erreur(s).",
+        regle_id,
+        resultat['leases_crees'],
+        resultat['erreurs'],
+    )
+    return resultat
 
 
 def appliquer_penalite_task(regle_id):
@@ -274,7 +362,7 @@ def appliquer_penalite_task(regle_id):
         compte_id=regle.compte_id,
         contrat__regle_penalite=regle,
         statut__in=[Lease.STATUT_NON_PAYE, Lease.STATUT_PARTIEL],
-        date_echeance__lte=aujourdhui,
+        date_echeance__date__lte=aujourdhui,
     ).exclude(
         contrat__statut__in=['SUSPENDU', 'CONTENTIEUX', 'SOLDE']
     ).annotate(
