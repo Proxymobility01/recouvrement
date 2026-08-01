@@ -41,6 +41,11 @@ from recouvrement.api.v1.views import (
     InitiationPaiementView,
     WebhookView,
 )
+from recouvrement.api.v1.serializers import (
+    CalendrierSerializer,
+    ContratSerializer,
+    LeaseSerializer,
+)
 from recouvrement.services import (
     PaymentService,
     calculer_prochaine_occurrence,
@@ -562,6 +567,35 @@ class GenerationLeasesTests(TestCase):
             self.contrat.prochaine_echeance,
             occurrence_aware(2026, 7, 30, 12),
         )
+
+    def test_les_reponses_mobiles_exposent_temporairement_des_dates(self):
+        lease = Lease.objects.create(
+            compte_id=self.compte_id,
+            contrat=self.contrat,
+            date_echeance=occurrence_aware(2026, 7, 29, 12),
+            montant_attendu=Decimal('5000.00'),
+        )
+
+        self.assertEqual(
+            ContratSerializer(self.contrat).data['prochaine_echeance'],
+            '2026-07-29',
+        )
+        self.assertEqual(
+            LeaseSerializer(lease).data['date_echeance'],
+            '2026-07-29',
+        )
+        self.assertEqual(
+            CalendrierSerializer(lease).data['date_echeance'],
+            '2026-07-29',
+        )
+
+        valeur_entree = (
+            ContratSerializer()
+            .fields['prochaine_echeance']
+            .run_validation('2026-07-29T22:00:00+01:00')
+        )
+        self.assertIsInstance(valeur_entree, datetime)
+        self.assertEqual(valeur_entree.hour, 22)
 
     def test_q2_ne_duplique_pas_une_occurrence_generee_manuellement(self):
         limite = occurrence_aware(2026, 7, 29, 22)

@@ -10,6 +10,28 @@ from recouvrement.models import Contrat, Lease, Paiement, TypeContrat, Parametre
     SessionPaiement, RegleGenerationLease
 
 
+class DateSeulementEnLectureMixin:
+    """
+    Expose temporairement certains DateTimeField au format YYYY-MM-DD.
+
+    La désérialisation reste celle du DateTimeField d'origine : seuls les
+    payloads de réponse sont adaptés pour l'ancienne application mobile.
+    """
+    champs_datetime_en_date = ()
+
+    def to_representation(self, instance):
+        representation = super().to_representation(instance)
+        for champ in self.champs_datetime_en_date:
+            valeur = getattr(instance, champ, None)
+            if valeur is None:
+                representation[champ] = None
+                continue
+            if timezone.is_aware(valeur):
+                valeur = timezone.localtime(valeur)
+            representation[champ] = valeur.date().isoformat()
+        return representation
+
+
 class TypeContratSerializer(serializers.ModelSerializer):
     class Meta:
         model = TypeContrat
@@ -48,13 +70,17 @@ class TypeContratSerializer(serializers.ModelSerializer):
         return libelle_formate
 
 
-class SousContratSerializer(serializers.ModelSerializer):
+class SousContratSerializer(
+    DateSeulementEnLectureMixin,
+    serializers.ModelSerializer,
+):
     """
     Serializer utilisé UNIQUEMENT en lecture pour afficher les enfants
     dans le détail du parent, OU lors de la création groupée.
     """
     specificites = serializers.JSONField(required=False, allow_null=True)
     montant_paye = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, default=0)
+    champs_datetime_en_date = ('prochaine_echeance',)
 
     class Meta:
         model = Contrat
@@ -89,12 +115,13 @@ class SousContratSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class ContratSerializer(serializers.ModelSerializer):
+class ContratSerializer(DateSeulementEnLectureMixin, serializers.ModelSerializer):
     enregistre_par_nom_complet = serializers.CharField(source='enregistre_par.nom_complet', read_only=True)
     chauffeur_nom_complet = serializers.CharField(source='chauffeur.nom_complet', read_only=True)
     specificites = serializers.JSONField(required=False, allow_null=True)
     type_contrat_libelle = serializers.CharField(source='type_contrat.libelle', read_only=True)
     montant_paye = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, default=0)
+    champs_datetime_en_date = ('prochaine_echeance',)
 
     class Meta:
         model = Contrat
@@ -267,12 +294,13 @@ class ContratSerializer(serializers.ModelSerializer):
         return super().update(instance, validated_data)
 
 
-class LeaseSerializer(serializers.ModelSerializer):
+class LeaseSerializer(DateSeulementEnLectureMixin, serializers.ModelSerializer):
     chauffeur_nom_complet = serializers.CharField(source='contrat.nom_complet', read_only=True)
     contrat_id = serializers.IntegerField(source='contrat.id', read_only=True)
     compte_id = serializers.IntegerField(source='contrat.compte_id', read_only=True)
     type_contrat_libelle = serializers.CharField(source='contrat.type_contrat.libelle', read_only=True)
     reste_a_payer = serializers.SerializerMethodField()
+    champs_datetime_en_date = ('date_echeance',)
 
     class Meta:
         model = Lease
@@ -295,8 +323,9 @@ class LeaseSerializer(serializers.ModelSerializer):
         return obj.montant_attendu - obj.montant_paye
 
 
-class CalendrierSerializer(serializers.ModelSerializer):
+class CalendrierSerializer(DateSeulementEnLectureMixin, serializers.ModelSerializer):
     chauffeur_nom = serializers.CharField(source='contrat.chauffeur.nom_complet', read_only=True, default="Inconnu")
+    champs_datetime_en_date = ('date_echeance',)
 
 
     class Meta:
