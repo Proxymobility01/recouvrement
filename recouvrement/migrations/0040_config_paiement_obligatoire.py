@@ -1,8 +1,7 @@
-import django.db.models.deletion
-from django.db import migrations, models
+from django.db import migrations
 
 
-def affecter_configurations_existantes(apps, schema_editor):
+def affecter_configurations_existantes_si_disponibles(apps, schema_editor):
     ConfigPaiement = apps.get_model('accounts', 'ConfigPaiement')
     Contrat = apps.get_model('recouvrement', 'Contrat')
     SessionPaiement = apps.get_model('recouvrement', 'SessionPaiement')
@@ -18,7 +17,6 @@ def affecter_configurations_existantes(apps, schema_editor):
         .values_list('compte_id', flat=True)
     )
 
-    comptes_sans_configuration = []
     for compte_id in sorted(compte_ids):
         configurations = ConfigPaiement.objects.filter(compte_id=compte_id)
         config = (
@@ -26,7 +24,8 @@ def affecter_configurations_existantes(apps, schema_editor):
             or configurations.order_by('-actif', 'id').first()
         )
         if config is None:
-            comptes_sans_configuration.append(compte_id)
+            # La configuration Mobile Money est facultative. Les contrats
+            # et sessions de ce compte restent donc volontairement à NULL.
             continue
 
         Contrat.objects.filter(
@@ -38,13 +37,6 @@ def affecter_configurations_existantes(apps, schema_editor):
             config_paiement__isnull=True,
         ).update(config_paiement_id=config.id)
 
-    if comptes_sans_configuration:
-        comptes = ', '.join(map(str, comptes_sans_configuration))
-        raise RuntimeError(
-            "Impossible de rendre la configuration de paiement obligatoire : "
-            f"aucune configuration n'existe pour le(s) compte(s) {comptes}."
-        )
-
 
 class Migration(migrations.Migration):
 
@@ -55,35 +47,7 @@ class Migration(migrations.Migration):
 
     operations = [
         migrations.RunPython(
-            affecter_configurations_existantes,
+            affecter_configurations_existantes_si_disponibles,
             migrations.RunPython.noop,
-        ),
-        migrations.AlterField(
-            model_name='contrat',
-            name='config_paiement',
-            field=models.ForeignKey(
-                help_text=(
-                    "Configuration obligatoire utilisée pour encaisser les "
-                    "paiements de ce contrat."
-                ),
-                on_delete=django.db.models.deletion.PROTECT,
-                related_name='contrats',
-                to='accounts.configpaiement',
-                verbose_name='Configuration de paiement',
-            ),
-        ),
-        migrations.AlterField(
-            model_name='sessionpaiement',
-            name='config_paiement',
-            field=models.ForeignKey(
-                help_text=(
-                    "Configuration ayant servi à créer la transaction auprès "
-                    "de la passerelle."
-                ),
-                on_delete=django.db.models.deletion.PROTECT,
-                related_name='sessions_paiement',
-                to='accounts.configpaiement',
-                verbose_name='Configuration de paiement utilisée',
-            ),
         ),
     ]
