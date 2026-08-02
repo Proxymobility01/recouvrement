@@ -32,6 +32,7 @@ from recouvrement.admin import (
 from recouvrement.models import (
     Contrat,
     Lease,
+    Parametre,
     Paiement,
     RegleGenerationLease,
     SessionPaiement,
@@ -48,14 +49,15 @@ from recouvrement.api.v1.serializers import (
 )
 from recouvrement.services import (
     PaymentService,
+    assurer_lease_suivant_du_lease,
     calculer_prochaine_occurrence,
     generer_leases_pour_regle,
 )
 
 
-def occurrence_aware(annee, mois, jour, heure):
+def occurrence_aware(annee, mois, jour, heure, minute=0):
     return timezone.make_aware(
-        datetime(annee, mois, jour, heure),
+        datetime(annee, mois, jour, heure, minute),
         timezone.get_current_timezone(),
     )
 
@@ -778,6 +780,430 @@ class GenerationLeasesTests(TestCase):
         self.assertEqual(
             Lease.objects.filter(contrat=self.contrat).count(),
             3,
+        )
+
+    def test_paiement_utilise_le_curseur_si_le_lease_source_est_desaligne(self):
+        self.regle.cron_expression = '0 8 * * *'
+        self.regle.save(update_fields=['cron_expression'])
+        self.contrat.prochaine_echeance = occurrence_aware(2026, 8, 6, 8)
+        self.contrat.save(update_fields=['prochaine_echeance'])
+        lease_source = Lease.objects.create(
+            compte_id=self.compte_id,
+            contrat=self.contrat,
+            date_echeance=occurrence_aware(2026, 8, 5, 7),
+            montant_attendu=Decimal('5000.00'),
+            montant_paye=Decimal('5000.00'),
+            statut=Lease.STATUT_PAYE,
+        )
+
+        resultat = assurer_lease_suivant_du_lease(lease_source.id)
+
+        self.assertEqual(resultat['statut'], 'CREE')
+        self.assertFalse(
+            Lease.objects.filter(
+                contrat=self.contrat,
+                date_echeance=occurrence_aware(2026, 8, 5, 8),
+            ).exists()
+        )
+        self.assertTrue(
+            Lease.objects.filter(
+                contrat=self.contrat,
+                date_echeance=occurrence_aware(2026, 8, 6, 8),
+            ).exists()
+        )
+        self.contrat.refresh_from_db()
+        self.assertEqual(
+            self.contrat.prochaine_echeance,
+            occurrence_aware(2026, 8, 7, 8),
+        )
+
+    def test_paiement_normalise_l_heure_incorrecte_du_curseur(self):
+        self.regle.cron_expression = '30 9 * * *'
+        self.regle.save(update_fields=['cron_expression'])
+        self.contrat.prochaine_echeance = occurrence_aware(
+            2026, 8, 2, 9, 29
+        )
+        self.contrat.save(update_fields=['prochaine_echeance'])
+        lease_source = Lease.objects.create(
+            compte_id=self.compte_id,
+            contrat=self.contrat,
+            date_echeance=occurrence_aware(2026, 8, 1, 9, 30),
+            montant_attendu=Decimal('5000.00'),
+            montant_paye=Decimal('5000.00'),
+            statut=Lease.STATUT_PAYE,
+        )
+
+        resultat = assurer_lease_suivant_du_lease(lease_source.id)
+
+        self.assertEqual(resultat['statut'], 'CREE')
+        self.assertFalse(
+            Lease.objects.filter(
+                contrat=self.contrat,
+                date_echeance=occurrence_aware(2026, 8, 2, 9, 29),
+            ).exists()
+        )
+        self.assertTrue(
+            Lease.objects.filter(
+                contrat=self.contrat,
+                date_echeance=occurrence_aware(2026, 8, 2, 9, 30),
+            ).exists()
+        )
+        self.contrat.refresh_from_db()
+        self.assertEqual(
+            self.contrat.prochaine_echeance,
+            occurrence_aware(2026, 8, 3, 9, 30),
+        )
+
+    def test_paiement_prend_le_premier_creneau_officiel_manquant(self):
+        self.regle.cron_expression = '0 10,23 * * *'
+        self.regle.save(update_fields=['cron_expression'])
+        self.contrat.prochaine_echeance = occurrence_aware(2026, 8, 2, 20)
+        self.contrat.save(update_fields=['prochaine_echeance'])
+        lease_source = Lease.objects.create(
+            compte_id=self.compte_id,
+            contrat=self.contrat,
+            date_echeance=occurrence_aware(2026, 8, 1, 23),
+            montant_attendu=Decimal('5000.00'),
+            montant_paye=Decimal('5000.00'),
+            statut=Lease.STATUT_PAYE,
+        )
+
+        resultat = assurer_lease_suivant_du_lease(lease_source.id)
+
+        self.assertEqual(resultat['statut'], 'CREE')
+        self.assertTrue(
+            Lease.objects.filter(
+                contrat=self.contrat,
+                date_echeance=occurrence_aware(2026, 8, 2, 10),
+            ).exists()
+        )
+        self.assertFalse(
+            Lease.objects.filter(
+                contrat=self.contrat,
+                date_echeance=occurrence_aware(2026, 8, 2, 20),
+            ).exists()
+        )
+        self.contrat.refresh_from_db()
+        self.assertEqual(
+            self.contrat.prochaine_echeance,
+            occurrence_aware(2026, 8, 2, 23),
+        )
+
+    def test_paiement_passe_au_second_creneau_si_le_premier_est_paye(self):
+        self.regle.cron_expression = '0 10,23 * * *'
+        self.regle.save(update_fields=['cron_expression'])
+        self.contrat.prochaine_echeance = occurrence_aware(2026, 8, 2, 20)
+        self.contrat.save(update_fields=['prochaine_echeance'])
+        lease_source = Lease.objects.create(
+            compte_id=self.compte_id,
+            contrat=self.contrat,
+            date_echeance=occurrence_aware(2026, 8, 2, 10),
+            montant_attendu=Decimal('5000.00'),
+            montant_paye=Decimal('5000.00'),
+            statut=Lease.STATUT_PAYE,
+        )
+
+        resultat = assurer_lease_suivant_du_lease(lease_source.id)
+
+        self.assertEqual(resultat['statut'], 'CREE')
+        self.assertTrue(
+            Lease.objects.filter(
+                contrat=self.contrat,
+                date_echeance=occurrence_aware(2026, 8, 2, 23),
+            ).exists()
+        )
+        self.assertFalse(
+            Lease.objects.filter(
+                contrat=self.contrat,
+                date_echeance=occurrence_aware(2026, 8, 2, 20),
+            ).exists()
+        )
+        self.contrat.refresh_from_db()
+        self.assertEqual(
+            self.contrat.prochaine_echeance,
+            occurrence_aware(2026, 8, 3, 10),
+        )
+
+    def test_paiement_saute_le_jour_de_repos_depuis_le_curseur(self):
+        self.regle.cron_expression = '0 8 * * *'
+        self.regle.save(update_fields=['cron_expression'])
+        Parametre.objects.create(
+            compte_id=self.compte_id,
+            jours_repos=[0],
+        )
+        self.contrat.prochaine_echeance = occurrence_aware(2026, 8, 3, 8)
+        self.contrat.save(update_fields=['prochaine_echeance'])
+        lease_source = Lease.objects.create(
+            compte_id=self.compte_id,
+            contrat=self.contrat,
+            date_echeance=occurrence_aware(2026, 8, 2, 8),
+            montant_attendu=Decimal('5000.00'),
+            montant_paye=Decimal('5000.00'),
+            statut=Lease.STATUT_PAYE,
+        )
+
+        assurer_lease_suivant_du_lease(lease_source.id)
+
+        self.assertTrue(
+            Lease.objects.filter(
+                contrat=self.contrat,
+                date_echeance=occurrence_aware(2026, 8, 4, 8),
+            ).exists()
+        )
+        self.contrat.refresh_from_db()
+        self.assertEqual(
+            self.contrat.prochaine_echeance,
+            occurrence_aware(2026, 8, 5, 8),
+        )
+
+    def test_paiement_autorise_deux_occurrences_le_meme_jour(self):
+        self.contrat.prochaine_echeance = occurrence_aware(2026, 7, 29, 22)
+        self.contrat.save(update_fields=['prochaine_echeance'])
+        lease_source = Lease.objects.create(
+            compte_id=self.compte_id,
+            contrat=self.contrat,
+            date_echeance=occurrence_aware(2026, 7, 29, 12),
+            montant_attendu=Decimal('5000.00'),
+            montant_paye=Decimal('5000.00'),
+            statut=Lease.STATUT_PAYE,
+        )
+
+        assurer_lease_suivant_du_lease(lease_source.id)
+
+        self.assertTrue(
+            Lease.objects.filter(
+                contrat=self.contrat,
+                date_echeance=occurrence_aware(2026, 7, 29, 22),
+            ).exists()
+        )
+        self.contrat.refresh_from_db()
+        self.assertEqual(
+            self.contrat.prochaine_echeance,
+            occurrence_aware(2026, 7, 30, 12),
+        )
+
+    def test_generation_daily_normalise_minuit_sur_heure_de_la_regle(self):
+        self.regle.frequence = Schedule.DAILY
+        self.regle.cron_expression = None
+        self.regle.debut = occurrence_aware(2026, 7, 29, 2)
+        self.regle.save()
+        self.contrat.prochaine_echeance = occurrence_aware(2026, 8, 2, 0)
+        self.contrat.save(update_fields=['prochaine_echeance'])
+
+        resultat = generer_leases_pour_regle(
+            self.regle.id,
+            occurrence_aware(2026, 8, 2, 2),
+        )
+
+        self.assertEqual(resultat['leases_crees'], 1)
+        self.assertEqual(
+            list(
+                Lease.objects.filter(contrat=self.contrat)
+                .values_list('date_echeance', flat=True)
+            ),
+            [occurrence_aware(2026, 8, 2, 2)],
+        )
+        self.contrat.refresh_from_db()
+        self.assertEqual(
+            self.contrat.prochaine_echeance,
+            occurrence_aware(2026, 8, 3, 2),
+        )
+
+    def test_generation_cron_ne_cree_pas_le_lease_du_curseur_desaligne(self):
+        self.regle.cron_expression = '30 9 * * *'
+        self.regle.save(update_fields=['cron_expression'])
+        self.contrat.prochaine_echeance = occurrence_aware(
+            2026, 8, 2, 9, 29
+        )
+        self.contrat.save(update_fields=['prochaine_echeance'])
+
+        resultat = generer_leases_pour_regle(
+            self.regle.id,
+            occurrence_aware(2026, 8, 2, 9, 30),
+        )
+
+        self.assertEqual(resultat['leases_crees'], 1)
+        self.assertEqual(
+            list(
+                Lease.objects.filter(contrat=self.contrat)
+                .values_list('date_echeance', flat=True)
+            ),
+            [occurrence_aware(2026, 8, 2, 9, 30)],
+        )
+        self.contrat.refresh_from_db()
+        self.assertEqual(
+            self.contrat.prochaine_echeance,
+            occurrence_aware(2026, 8, 3, 9, 30),
+        )
+
+    def test_generation_cron_interprete_le_debut_dans_le_fuseau_local(self):
+        self.regle.cron_expression = '31 12 * * *'
+        self.regle.debut = occurrence_aware(2026, 8, 2, 8)
+        self.regle.save(update_fields=['cron_expression', 'debut'])
+        self.contrat.prochaine_echeance = occurrence_aware(
+            2026, 8, 2, 12, 30
+        )
+        self.contrat.save(update_fields=['prochaine_echeance'])
+
+        resultat = generer_leases_pour_regle(
+            self.regle.id,
+            occurrence_aware(2026, 8, 2, 12, 31),
+        )
+
+        self.assertEqual(resultat['leases_crees'], 1)
+        self.assertEqual(
+            list(
+                Lease.objects.filter(contrat=self.contrat)
+                .values_list('date_echeance', flat=True)
+            ),
+            [occurrence_aware(2026, 8, 2, 12, 31)],
+        )
+        self.contrat.refresh_from_db()
+        self.assertEqual(
+            self.contrat.prochaine_echeance,
+            occurrence_aware(2026, 8, 3, 12, 31),
+        )
+
+    def test_generation_ignore_un_curseur_superieur_a_la_limite(self):
+        self.regle.cron_expression = '30 9 * * *'
+        self.regle.save(update_fields=['cron_expression'])
+        curseur = occurrence_aware(2026, 8, 2, 9, 31)
+        self.contrat.prochaine_echeance = curseur
+        self.contrat.save(update_fields=['prochaine_echeance'])
+
+        resultat = generer_leases_pour_regle(
+            self.regle.id,
+            occurrence_aware(2026, 8, 2, 9, 30),
+        )
+
+        self.assertEqual(resultat['contrats_cibles'], 0)
+        self.assertEqual(resultat['leases_crees'], 0)
+        self.assertFalse(Lease.objects.filter(contrat=self.contrat).exists())
+        self.contrat.refresh_from_db()
+        self.assertEqual(self.contrat.prochaine_echeance, curseur)
+
+    def test_generation_rattrape_un_curseur_superieur_au_passage_precedent(self):
+        self.regle.cron_expression = '30 9 * * *'
+        self.regle.save(update_fields=['cron_expression'])
+        self.contrat.prochaine_echeance = occurrence_aware(
+            2026, 8, 2, 9, 31
+        )
+        self.contrat.save(update_fields=['prochaine_echeance'])
+
+        resultat = generer_leases_pour_regle(
+            self.regle.id,
+            occurrence_aware(2026, 8, 3, 9, 30),
+        )
+
+        self.assertEqual(resultat['leases_crees'], 2)
+        self.assertEqual(
+            list(
+                Lease.objects.filter(contrat=self.contrat)
+                .order_by('date_echeance')
+                .values_list('date_echeance', flat=True)
+            ),
+            [
+                occurrence_aware(2026, 8, 2, 9, 30),
+                occurrence_aware(2026, 8, 3, 9, 30),
+            ],
+        )
+        self.assertFalse(
+            Lease.objects.filter(
+                contrat=self.contrat,
+                date_echeance=occurrence_aware(2026, 8, 2, 9, 31),
+            ).exists()
+        )
+
+    def test_generation_rattrape_les_creneaux_officiels_manquants(self):
+        self.regle.cron_expression = '0 10,23 * * *'
+        self.regle.save(update_fields=['cron_expression'])
+        self.contrat.prochaine_echeance = occurrence_aware(2026, 8, 2, 20)
+        self.contrat.save(update_fields=['prochaine_echeance'])
+
+        resultat = generer_leases_pour_regle(
+            self.regle.id,
+            occurrence_aware(2026, 8, 2, 23),
+        )
+
+        self.assertEqual(resultat['leases_crees'], 2)
+        self.assertEqual(
+            list(
+                Lease.objects.filter(contrat=self.contrat)
+                .order_by('date_echeance')
+                .values_list('date_echeance', flat=True)
+            ),
+            [
+                occurrence_aware(2026, 8, 2, 10),
+                occurrence_aware(2026, 8, 2, 23),
+            ],
+        )
+        self.contrat.refresh_from_db()
+        self.assertEqual(
+            self.contrat.prochaine_echeance,
+            occurrence_aware(2026, 8, 3, 10),
+        )
+
+    def test_generation_ne_duplique_pas_un_creneau_officiel_existant(self):
+        self.regle.cron_expression = '0 10,23 * * *'
+        self.regle.save(update_fields=['cron_expression'])
+        Lease.objects.create(
+            compte_id=self.compte_id,
+            contrat=self.contrat,
+            date_echeance=occurrence_aware(2026, 8, 2, 10),
+            montant_attendu=Decimal('5000.00'),
+        )
+        self.contrat.prochaine_echeance = occurrence_aware(2026, 8, 2, 20)
+        self.contrat.save(update_fields=['prochaine_echeance'])
+
+        resultat = generer_leases_pour_regle(
+            self.regle.id,
+            occurrence_aware(2026, 8, 2, 23),
+        )
+
+        self.assertEqual(resultat['leases_crees'], 1)
+        self.assertEqual(resultat['doublons_ignores'], 1)
+        self.assertEqual(
+            list(
+                Lease.objects.filter(contrat=self.contrat)
+                .order_by('date_echeance')
+                .values_list('date_echeance', flat=True)
+            ),
+            [
+                occurrence_aware(2026, 8, 2, 10),
+                occurrence_aware(2026, 8, 2, 23),
+            ],
+        )
+
+    def test_paiement_ne_genere_pas_si_un_lease_posterieur_existe(self):
+        lease_source = Lease.objects.create(
+            compte_id=self.compte_id,
+            contrat=self.contrat,
+            date_echeance=occurrence_aware(2026, 7, 29, 12),
+            montant_attendu=Decimal('5000.00'),
+            montant_paye=Decimal('5000.00'),
+            statut=Lease.STATUT_PAYE,
+        )
+        lease_suivant = Lease.objects.create(
+            compte_id=self.compte_id,
+            contrat=self.contrat,
+            date_echeance=occurrence_aware(2026, 7, 29, 22),
+            montant_attendu=Decimal('5000.00'),
+        )
+        self.contrat.prochaine_echeance = occurrence_aware(2026, 7, 30, 12)
+        self.contrat.save(update_fields=['prochaine_echeance'])
+
+        resultat = assurer_lease_suivant_du_lease(lease_source.id)
+
+        self.assertEqual(resultat['statut'], 'EXISTANT')
+        self.assertEqual(resultat['lease_id'], lease_suivant.id)
+        self.assertEqual(
+            Lease.objects.filter(contrat=self.contrat).count(),
+            2,
+        )
+        self.contrat.refresh_from_db()
+        self.assertEqual(
+            self.contrat.prochaine_echeance,
+            occurrence_aware(2026, 7, 30, 12),
         )
 
     def test_paiement_mobile_partiel_ne_declenche_pas_de_generation(self):

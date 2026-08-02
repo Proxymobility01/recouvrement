@@ -1,6 +1,7 @@
 import logging
 from collections import defaultdict
 from datetime import date, datetime, time, timedelta
+from math import ceil
 
 import requests
 from croniter import croniter
@@ -112,6 +113,85 @@ def calculer_prochaine_occurrence(regle, occurrence):
     return suivante
 
 
+def premiere_occurrence_planifiee(regle, a_partir_de):
+    """Retourne la première occurrence officielle >= ``a_partir_de``.
+
+    Contrairement à :func:`calculer_prochaine_occurrence`, ce calcul part de
+    l'ancre de la règle (``debut`` ou l'expression Cron). Une heure arbitraire
+    enregistrée sur un contrat ne peut donc jamais devenir l'heure d'un lease.
+    """
+    fuseau = timezone.get_current_timezone()
+    a_partir_de = timezone.localtime(
+        normaliser_limite_generation(a_partir_de),
+        fuseau,
+    )
+    debut = timezone.localtime(
+        normaliser_limite_generation(regle.debut),
+        fuseau,
+    )
+    point_depart = max(a_partir_de, debut)
+
+    if regle.frequence == Schedule.ONCE:
+        return debut if debut >= a_partir_de else None
+
+    if regle.frequence == Schedule.CRON:
+        if not regle.cron_expression:
+            raise LeaseGenerationConfigurationError(
+                f"La règle {regle.id} est de type CRON sans expression Cron."
+            )
+        try:
+            occurrence = croniter(
+                regle.cron_expression,
+                point_depart - timedelta(microseconds=1),
+            ).get_next(datetime)
+        except (ValueError, KeyError) as exc:
+            raise LeaseGenerationConfigurationError(
+                f"Expression Cron invalide pour la règle {regle.id}: "
+                f"{regle.cron_expression}"
+            ) from exc
+        return normaliser_limite_generation(occurrence)
+
+    if point_depart <= debut:
+        return debut
+
+    secondes_ecoulees = (point_depart - debut).total_seconds()
+    if regle.frequence == Schedule.HOURLY:
+        nombre_pas = ceil(secondes_ecoulees / 3600)
+        occurrence = debut + timedelta(hours=nombre_pas)
+    elif regle.frequence == Schedule.DAILY:
+        nombre_pas = ceil(secondes_ecoulees / 86400)
+        occurrence = debut + timedelta(days=nombre_pas)
+    elif regle.frequence == Schedule.WEEKLY:
+        nombre_pas = ceil(secondes_ecoulees / (7 * 86400))
+        occurrence = debut + timedelta(weeks=nombre_pas)
+    elif regle.frequence == Schedule.MONTHLY:
+        occurrence = debut
+        while occurrence < point_depart:
+            occurrence = occurrence + relativedelta(months=1)
+    else:
+        raise LeaseGenerationConfigurationError(
+            f"Fréquence inconnue pour la règle {regle.id}: {regle.frequence}"
+        )
+
+    return normaliser_limite_generation(occurrence)
+
+
+def normaliser_curseur_generation(regle, curseur):
+    """Aligne un curseur exigible sur les créneaux officiels de sa date.
+
+    La date locale du curseur reste la borne métier. Son heure n'est qu'une
+    valeur d'éligibilité et n'est jamais reprise dans ``Lease.date_echeance``.
+    Repartir du début de cette date permet de rattraper un premier créneau
+    manquant avant de traiter les suivants.
+    """
+    curseur = normaliser_limite_generation(curseur)
+    fuseau = timezone.get_current_timezone()
+    curseur_local = timezone.localtime(curseur, fuseau)
+    debut_jour_naif = datetime.combine(curseur_local.date(), time.min)
+    debut_jour = timezone.make_aware(debut_jour_naif, fuseau)
+    return premiere_occurrence_planifiee(regle, debut_jour)
+
+
 def _normaliser_jours_repos(jours_repos):
     jours = {
         int(jour)
@@ -193,14 +273,30 @@ def generer_leases_pour_regle(regle_id, jusqu_a=None):
                     )
                 )
 
+                if contrat.prochaine_echeance is None:
+                    continue
+
                 # Un autre worker ou la commande a pu faire avancer le curseur
-                # pendant que ce worker attendait le verrou.
-                while contrat.prochaine_echeance:
-                    occurrence = normaliser_limite_generation(
-                        contrat.prochaine_echeance
-                    )
-                    if occurrence > limite:
-                        break
+                # pendant que ce worker attendait le verrou. Le test sur la
+                # valeur brute reste la seule condition d'éligibilité.
+                curseur = normaliser_limite_generation(
+                    contrat.prochaine_echeance
+                )
+                if curseur <= limite:
+                    # Une fois le contrat exigible, l'heure du curseur est
+                    # remplacée par la première occurrence officielle de sa
+                    # date. Les heures arbitraires ne deviennent jamais des
+                    # dates d'échéance de lease.
+                    occurrence = normaliser_curseur_generation(regle, curseur)
+                    contrat.prochaine_echeance = occurrence
+                    if occurrence is None:
+                        compteurs_contrat['contrats_termines'] = 1
+
+                while (
+                    contrat.prochaine_echeance
+                    and contrat.prochaine_echeance <= limite
+                ):
+                    occurrence = contrat.prochaine_echeance
 
                     occurrence_locale = timezone.localtime(
                         occurrence,
@@ -281,11 +377,13 @@ def generer_leases_pour_regle(regle_id, jusqu_a=None):
 
 def assurer_lease_suivant_du_lease(lease_source_id):
     """
-    S'assure que l'occurrence suivant un lease Mobile Money payé existe.
+    S'assure qu'un lease postérieur au lease Mobile Money payé existe.
 
-    Le paiement et la tâche planifiée peuvent appeler cette logique en
-    concurrence : le verrou du contrat et la contrainte d'unicité du lease
-    garantissent qu'ils visent la même occurrence sans créer la suivante.
+    ``Contrat.prochaine_echeance`` est l'unique curseur de génération. La
+    date du lease payé sert seulement à vérifier qu'un lease postérieur
+    n'existe pas déjà. Le paiement et la tâche planifiée peuvent appeler
+    cette logique en concurrence : le verrou du contrat et la contrainte
+    d'unicité du lease garantissent l'idempotence.
     """
     from .models import Contrat, Lease, Parametre
 
@@ -333,40 +431,70 @@ def assurer_lease_suivant_du_lease(lease_source_id):
             .first()
         )
 
-        occurrence = calculer_prochaine_occurrence(
-            regle,
-            lease_source.date_echeance,
+        # La tâche planifiée, un paiement précédent de la même session ou
+        # une notification déjà traitée peuvent avoir créé le lease suivant.
+        # Dans ce cas, il ne faut pas allonger une seconde fois la chaîne.
+        lease_suivant_existant = (
+            Lease.objects.filter(
+                contrat_id=contrat.id,
+                compte_id=contrat.compte_id,
+                date_echeance__gt=lease_source.date_echeance,
+            )
+            .exclude(statut=Lease.STATUT_ANNULE)
+            .order_by('date_echeance', 'id')
+            .first()
         )
-        occurrences_couvertes = []
+        if lease_suivant_existant is not None:
+            return {
+                'statut': 'EXISTANT',
+                'raison': 'LEASE_SUIVANT_DEJA_PRESENT',
+                'lease_id': lease_suivant_existant.id,
+                'lease_cree': False,
+            }
+
+        occurrence = normaliser_curseur_generation(
+            regle,
+            contrat.prochaine_echeance,
+        )
 
         while occurrence:
-            occurrences_couvertes.append(occurrence)
             occurrence_locale = timezone.localtime(
                 occurrence,
                 timezone.get_current_timezone(),
             )
-            if occurrence_locale.weekday() not in jours_repos:
-                break
-            occurrence = calculer_prochaine_occurrence(regle, occurrence)
 
-        if occurrence is None:
-            return ignorer('AUCUNE_OCCURRENCE_SUIVANTE')
-
-        occurrence_locale = timezone.localtime(
-            occurrence,
-            timezone.get_current_timezone(),
-        )
-        if contrat.date_fin and occurrence_locale.date() > contrat.date_fin:
             if (
-                contrat.prochaine_echeance
-                and normaliser_limite_generation(contrat.prochaine_echeance)
-                in occurrences_couvertes
+                contrat.date_fin
+                and occurrence_locale.date() > contrat.date_fin
             ):
                 contrat.prochaine_echeance = None
                 contrat.save(
                     update_fields=['prochaine_echeance', 'updated_at']
                 )
-            return ignorer('DATE_FIN_DEPASSEE')
+                return ignorer('DATE_FIN_DEPASSEE')
+
+            lease_a_occurrence = Lease.objects.filter(
+                contrat_id=contrat.id,
+                date_echeance=occurrence,
+            ).first()
+            occurrence_deja_annulee = (
+                lease_a_occurrence is not None
+                and lease_a_occurrence.statut == Lease.STATUT_ANNULE
+            )
+            if (
+                occurrence > lease_source.date_echeance
+                and occurrence_locale.weekday() not in jours_repos
+                and not occurrence_deja_annulee
+            ):
+                break
+            occurrence = calculer_prochaine_occurrence(regle, occurrence)
+
+        if occurrence is None:
+            contrat.prochaine_echeance = None
+            contrat.save(
+                update_fields=['prochaine_echeance', 'updated_at']
+            )
+            return ignorer('AUCUNE_OCCURRENCE_SUIVANTE')
 
         lease_suivant, lease_cree = Lease.objects.get_or_create(
             contrat=contrat,
@@ -378,18 +506,13 @@ def assurer_lease_suivant_du_lease(lease_source_id):
             },
         )
 
-        if contrat.prochaine_echeance:
-            curseur = normaliser_limite_generation(
-                contrat.prochaine_echeance
-            )
-            if curseur in occurrences_couvertes:
-                contrat.prochaine_echeance = calculer_prochaine_occurrence(
-                    regle,
-                    occurrence,
-                )
-                contrat.save(
-                    update_fields=['prochaine_echeance', 'updated_at']
-                )
+        contrat.prochaine_echeance = calculer_prochaine_occurrence(
+            regle,
+            occurrence,
+        )
+        contrat.save(
+            update_fields=['prochaine_echeance', 'updated_at']
+        )
 
         return {
             'statut': 'CREE' if lease_cree else 'EXISTANT',
