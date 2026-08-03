@@ -1,7 +1,7 @@
 # ==========================================
 # STAGE 1 : BUILDER (Compilation)
 # ==========================================
-FROM python:3.14.3-slim-trixie as builder
+FROM python:3.14.3-slim-trixie AS builder
 
 WORKDIR /usr/src/app
 
