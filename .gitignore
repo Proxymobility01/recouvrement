@@ -66,3 +66,7 @@ postgres_data/
 # Système
 .DS_Store
 Thumbs.db
+
+# Certificats et clés PgBouncer
+pgbouncer/tls/*
+!pgbouncer/tls/.gitkeep

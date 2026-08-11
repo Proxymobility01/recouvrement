@@ -50,6 +50,15 @@ services:
 
       - ADMIN_USERS=${DB_USER}
       - IGNORE_STARTUP_PARAMETERS=extra_float_digits,options
+
+      - CLIENT_TLS_SSLMODE=${PGBOUNCER_TLS_MODE:-disable}
+      - CLIENT_TLS_CERT_FILE=${PGBOUNCER_TLS_CERT_FILE:-}
+      - CLIENT_TLS_KEY_FILE=${PGBOUNCER_TLS_KEY_FILE:-}
+      - CLIENT_TLS_PROTOCOLS=${PGBOUNCER_TLS_PROTOCOLS:-secure}
+
+    volumes:
+      - ${PGBOUNCER_TLS_DIR:-./pgbouncer/tls}:/etc/pgbouncer/tls:ro
+
     ports:
       - "127.0.0.1:6432:5432"
     networks:
