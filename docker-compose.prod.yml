@@ -57,7 +57,7 @@ services:
       - CLIENT_TLS_PROTOCOLS=${PGBOUNCER_TLS_PROTOCOLS:-secure}
 
     volumes:
-      - ${CERTBOT_DIR:-./pgbouncer/tls}:/etc/letsencrypt:ro
+      - ./pgbouncer/tls:/etc/pgbouncer/tls:ro
 
     ports:
       - "127.0.0.1:6432:5432"
