@@ -11,7 +11,7 @@ bind = "0.0.0.0:8000"
 # PERFORMANCES (Workers & Threads)
 # ==========================================
 # Formule standard de Gunicorn pour exploiter à fond le CPU
-workers = min((2 * multiprocessing.cpu_count()) + 1, 4)
+workers = min((2 * multiprocessing.cpu_count()) + 1, 1)
 
 worker_class = "uvicorn.workers.UvicornWorker"
 
