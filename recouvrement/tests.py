@@ -32,6 +32,7 @@ from core.tasks import (
     verifier_statut_session_task,
 )
 from recouvrement.admin import (
+    Transaction,
     AssignerConfigPaiementContratsForm,
     AssignerRegleGenerationContratsForm,
     ContratAdminForm,
@@ -49,11 +50,18 @@ from recouvrement.models import (
     TypeContrat,
 )
 from recouvrement.api.v1.views import (
+    AgenceViewSet,
+    ContratViewSet,
     InitiationPaiementView,
+    LeaseViewSet,
+    PaiementViewSet,
+    PenaliteViewSet,
     RegleGenerationLeaseViewSet,
+    SessionPaiementViewSet,
     WebhookView,
 )
 from recouvrement.api.v1.serializers import (
+    AgenceSerializer,
     CalendrierSerializer,
     ContratSerializer,
     LeaseSerializer,
@@ -75,6 +83,104 @@ def occurrence_aware(annee, mois, jour, heure, minute=0):
         datetime(annee, mois, jour, heure, minute),
         timezone.get_current_timezone(),
     )
+
+
+class AgenceZoneTests(TestCase):
+    def test_enregistrement_normalise_zone_code_et_zone_search(self):
+        agence = Agence.objects.create(
+            compte_id=91,
+            nom='Agence Akwa',
+            zone='  Littoral Édéa  ',
+            code=' douala-akwa ',
+        )
+
+        self.assertEqual(agence.zone, 'LITTORAL ÉDÉA')
+        self.assertEqual(agence.zone_search, 'littoral edea')
+        self.assertEqual(agence.code, 'DOUALA-AKWA')
+
+    def test_update_fields_zone_met_aussi_zone_search_a_jour(self):
+        agence = Agence.objects.create(
+            compte_id=91,
+            nom='Agence Akwa',
+            zone='Douala',
+            code='DLA-AKWA',
+        )
+
+        agence.zone = '  Yaoundé  '
+        agence.save(update_fields=['zone'])
+        agence.refresh_from_db()
+
+        self.assertEqual(agence.zone, 'YAOUNDÉ')
+        self.assertEqual(agence.zone_search, 'yaounde')
+
+    def test_serializer_expose_la_zone_normalisee(self):
+        agence = Agence.objects.create(
+            compte_id=91,
+            nom='Agence Deido',
+            zone='Douala',
+            code='DLA-DEIDO',
+        )
+
+        self.assertEqual(
+            AgenceSerializer(agence).data['zone'],
+            'DOUALA',
+        )
+
+    def test_index_zone_search_et_index_code_sont_declares(self):
+        index_par_nom = {
+            index.name: index
+            for index in Agence._meta.indexes
+        }
+
+        self.assertEqual(
+            index_par_nom['idx_agence_zone_search_trgm'].fields,
+            ['zone_search'],
+        )
+        self.assertEqual(
+            index_par_nom['idx_agence_zone_search_trgm'].opclasses,
+            ['gin_trgm_ops'],
+        )
+        self.assertEqual(
+            index_par_nom['idx_agence_code'].fields,
+            ['code'],
+        )
+
+
+class RechercheAgenceTests(SimpleTestCase):
+    def test_recherche_api_agence_inclut_zone_et_code(self):
+        self.assertIn('zone_search', AgenceViewSet.search_fields)
+        self.assertIn('code', AgenceViewSet.search_fields)
+
+    def test_recherche_api_des_modeles_agence_inclut_zone_et_code(self):
+        viewsets = [
+            ContratViewSet,
+            LeaseViewSet,
+            PaiementViewSet,
+            PenaliteViewSet,
+            SessionPaiementViewSet,
+        ]
+
+        for viewset in viewsets:
+            with self.subTest(viewset=viewset.__name__):
+                self.assertIn(
+                    'agence__zone_search',
+                    viewset.search_fields,
+                )
+                self.assertIn('agence__code', viewset.search_fields)
+
+    def test_recherche_admin_des_modeles_agence_inclut_zone_et_code(self):
+        agence_admin = admin.site._registry[Agence]
+        self.assertIn('zone_search', agence_admin.search_fields)
+        self.assertIn('code', agence_admin.search_fields)
+
+        for model in [Contrat, Lease, Paiement, Penalite, Transaction]:
+            model_admin = admin.site._registry[model]
+            with self.subTest(model=model._meta.label):
+                self.assertIn(
+                    'agence__zone_search',
+                    model_admin.search_fields,
+                )
+                self.assertIn('agence__code', model_admin.search_fields)
 
 
 class CalculProchaineOccurrenceTests(SimpleTestCase):
@@ -858,6 +964,42 @@ class ConfigurationPaiementTests(TestCase):
         )
 
 
+class AdministrationIdCompteTests(SimpleTestCase):
+    def test_tous_les_admins_avec_compte_affichent_id_compte_en_premier(self):
+        admins_concernes = [
+            model_admin
+            for model, model_admin in admin.site._registry.items()
+            if any(
+                champ.name == 'compte_id'
+                for champ in model._meta.fields
+            )
+        ]
+
+        self.assertEqual(len(admins_concernes), 13)
+        for model_admin in admins_concernes:
+            list_display = tuple(model_admin.list_display)
+            self.assertEqual(
+                list_display[0],
+                'id_compte',
+                model_admin.model._meta.label,
+            )
+            self.assertNotIn(
+                'compte_id',
+                list_display,
+                model_admin.model._meta.label,
+            )
+
+    def test_colonne_id_compte_reproduit_le_rendu_attendu(self):
+        lease_admin = admin.site._registry[Lease]
+
+        contenu = str(lease_admin.id_compte(
+            SimpleNamespace(pk=5, compte_id=2),
+        ))
+
+        self.assertIn('<strong>#5</strong>', contenu)
+        self.assertIn('Compte 2', contenu)
+
+
 class AdministrationGenerationLeaseTests(TestCase):
     def test_regle_generation_est_enregistree_dans_admin(self):
         self.assertTrue(
@@ -1175,6 +1317,14 @@ class AssignationRegleGenerationTests(TestCase):
             planification['etat_planification'] == 'PLANIFIEE'
             for planification in planifications
         ))
+        self.assertTrue(all(
+            planification['statut_derniere_execution'] is None
+            for planification in planifications
+        ))
+        self.assertTrue(all(
+            'derniere_execution' not in planification
+            for planification in planifications
+        ))
 
     def test_detail_planification_utilise_le_groupe_et_filtre_resultat(self):
         self._autoriser_planification(self.agent)
@@ -1231,6 +1381,11 @@ class AssignationRegleGenerationTests(TestCase):
         self.assertEqual(execution['resultat']['leases_crees'], 2)
         self.assertNotIn('detail_interne', execution['resultat'])
         self.assertEqual(response.data['last_run'], maintenant)
+        self.assertEqual(
+            response.data['statut_derniere_execution'],
+            'SUCCES',
+        )
+        self.assertNotIn('derniere_execution', response.data)
 
     def test_detail_planification_inactive_reste_consultable(self):
         self._autoriser_planification(self.agent)

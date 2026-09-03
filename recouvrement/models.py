@@ -20,6 +20,20 @@ class Agence(BaseModel):
 
     nom = models.CharField(max_length=150)
     nom_search = models.CharField(max_length=255, null=True, blank=True)
+    zone = models.CharField(
+        "Zone / Ville",
+        max_length=100,
+        blank=True,
+        help_text=(
+            "Zone géographique utilisée pour regrouper plusieurs agences "
+            "d'une même ville ou région."
+        ),
+    )
+    zone_search = models.CharField(
+        max_length=255,
+        blank=True,
+        editable=False,
+    )
     code = models.SlugField(max_length=50)
     adresse = models.TextField(blank=True)
     telephone = models.CharField(max_length=20, blank=True)
@@ -38,6 +52,8 @@ class Agence(BaseModel):
         ]
         indexes = [
             GinIndex(fields=['nom_search'], name='idx_agence_nom_search_trgm', opclasses=['gin_trgm_ops']),
+            GinIndex(fields=['zone_search'], name='idx_agence_zone_search_trgm', opclasses=['gin_trgm_ops']),
+            models.Index(fields=['code'], name='idx_agence_code'),
             models.Index(
                 fields=['compte_id', 'actif'],
                 name='idx_agence_compte_actif',
@@ -53,6 +69,13 @@ class Agence(BaseModel):
         else:
             self.nom_search = ""
 
+        if self.zone:
+            self.zone = self.zone.strip().upper()
+            self.zone_search = remove_accents(self.zone)
+        else:
+            self.zone = ""
+            self.zone_search = ""
+
         if self.code:
             self.code = self.code.strip().upper()
 
@@ -64,6 +87,9 @@ class Agence(BaseModel):
             # Si on modifie le nom, on force la sauvegarde du nom_search
             if 'nom' in update_fields:
                 update_fields.add('nom_search')
+
+            if 'zone' in update_fields:
+                update_fields.add('zone_search')
 
             kwargs['update_fields'] = list(update_fields)
 

@@ -69,6 +69,7 @@ class AgenceSerializer(serializers.ModelSerializer):
             'id',
             'compte_id',
             'nom',
+            'zone',
             'code',
             'adresse',
             'telephone',

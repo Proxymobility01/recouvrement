@@ -7,11 +7,11 @@ from django.db import transaction
 from django.db.models import Count
 from django.shortcuts import render
 from django.utils import timezone
-from django.utils.html import format_html
 from django_q.models import Schedule
 from croniter import croniter
 from rangefilter.filters import DateRangeFilter, DateRangeQuickSelectListFilter
 from accounts.models import ConfigPaiement
+from core.admin_mixins import IdCompteAdminMixin
 from .services import annuler_leases_et_prolonger, AnnulationLeaseError
 from .models import (
     Agence,
@@ -280,21 +280,24 @@ class RegleGenerationLeaseAdminForm(forms.ModelForm):
 # ==========================================
 
 @admin.register(Agence)
-class AgenceAdmin(admin.ModelAdmin):
+class AgenceAdmin(IdCompteAdminMixin, admin.ModelAdmin):
     list_display = (
+        'id_compte',
         'code',
         'nom',
-        'compte_id',
+        'zone',
         'actif',
         'created_at',
     )
-    list_filter = ('actif', 'compte_id')
-    search_fields = ('code', 'nom', 'adresse', 'telephone', 'email')
+    list_filter = ('zone', 'actif', 'compte_id')
+    search_fields = (
+        'code', 'nom_search', 'zone_search', 'adresse', 'telephone', 'email',
+    )
     readonly_fields = ('created_at', 'updated_at')
     ordering = ('compte_id', 'nom')
     fieldsets = (
         ('Identification', {
-            'fields': ('compte_id', 'code', 'nom', 'actif')
+            'fields': ('compte_id', 'code', 'nom', 'zone', 'actif')
         }),
         ('Coordonnées', {
             'fields': ('adresse', 'telephone', 'email')
@@ -306,8 +309,10 @@ class AgenceAdmin(admin.ModelAdmin):
 
 
 @admin.register(TypeContrat)
-class TypeContratAdmin(admin.ModelAdmin):
-    list_display = ('libelle', 'code', 'est_principal', 'compte_id', 'created_at')
+class TypeContratAdmin(IdCompteAdminMixin, admin.ModelAdmin):
+    list_display = (
+        'id_compte', 'libelle', 'code', 'est_principal', 'created_at',
+    )
     list_filter = ('est_principal', 'compte_id')
     search_fields = ('libelle', 'code')
     ordering = ('libelle',)
@@ -315,14 +320,15 @@ class TypeContratAdmin(admin.ModelAdmin):
 
 
 @admin.register(Contrat)
-class ContratAdmin(admin.ModelAdmin):
+class ContratAdmin(IdCompteAdminMixin, admin.ModelAdmin):
     form = ContratAdminForm
     actions = [
         'assigner_regle_generation',
         'assigner_config_paiement',
     ]
     list_display = (
-        'id_reference',
+        'id_compte',
+        'reference',
         'nom_complet',
         'type_contrat',
         'statut',
@@ -336,7 +342,6 @@ class ContratAdmin(admin.ModelAdmin):
         'date_fin',
         'prochaine_echeance',
         'created_at',
-        'compte_id',
     )
     list_select_related = (
         'type_contrat',
@@ -364,7 +369,8 @@ class ContratAdmin(admin.ModelAdmin):
         'vin',
         'chauffeur__email',
         'agence__code',
-        'agence__nom',
+        'agence__nom_search',
+        'agence__zone_search',
     )
     date_hierarchy = 'created_at'
 
@@ -410,13 +416,6 @@ class ContratAdmin(admin.ModelAdmin):
                 agence_id=obj.agence_id,
                 updated_at=timezone.now(),
             )
-
-    def id_reference(self, obj):
-        """Colonne combinée : ID en gras, référence en dessous en plus discret."""
-        return format_html('<strong>#{}</strong><br><span style="color:#888;">{}</span>', obj.id, obj.reference)
-
-    id_reference.short_description = 'ID / Référence'
-    id_reference.admin_order_field = 'id'
 
     fieldsets = (
         ('Informations Générales', {
@@ -612,11 +611,12 @@ class ContratAdmin(admin.ModelAdmin):
 
 
 @admin.register(Transaction)
-class TransactionAdmin(admin.ModelAdmin):
+class TransactionAdmin(IdCompteAdminMixin, admin.ModelAdmin):
     """
     C'est ici qu'on gère l'affichage de SessionPaiement sous le nom "Transaction".
     """
     list_display = (
+        'id_compte',
         'reference',
         'montant_total',
         'statut',
@@ -625,7 +625,6 @@ class TransactionAdmin(admin.ModelAdmin):
         'telephone',
         'date_validation',
         'created_at',
-        'compte_id',
     )
     list_select_related = ('agence', 'config_paiement', 'utilisateur')
     list_filter = (
@@ -639,7 +638,8 @@ class TransactionAdmin(admin.ModelAdmin):
         'telephone',
         'utilisateur__email',
         'agence__code',
-        'agence__nom',
+        'agence__nom_search',
+        'agence__zone_search',
     )
     raw_id_fields = ('utilisateur',)
 
@@ -658,8 +658,9 @@ class TransactionAdmin(admin.ModelAdmin):
 
 
 @admin.register(Lease)
-class LeaseAdmin(admin.ModelAdmin):
+class LeaseAdmin(IdCompteAdminMixin, admin.ModelAdmin):
     list_display = (
+        'id_compte',
         'contrat',
         'agence',
         'date_echeance',
@@ -667,7 +668,6 @@ class LeaseAdmin(admin.ModelAdmin):
         'montant_attendu',
         'montant_paye',
         'statut',
-        'id_compte',
     )
     list_filter = (
         ('created_at', DateRangeAvecHierFilter),
@@ -682,7 +682,8 @@ class LeaseAdmin(admin.ModelAdmin):
         'nom_complet',
         'nom_complet_search',
         'agence__code',
-        'agence__nom',
+        'agence__nom_search',
+        'agence__zone_search',
     )
     raw_id_fields = ('contrat',)
     readonly_fields = (
@@ -693,13 +694,6 @@ class LeaseAdmin(admin.ModelAdmin):
         'updated_at',
     )
     ordering = ('-date_echeance',)
-
-    def id_compte(self, obj):
-        """Colonne combinée : ID du lease en gras, compte_id (tenant) en dessous."""
-        return format_html('<strong>#{}</strong><br><span style="color:#888;">Compte {}</span>', obj.id, obj.compte_id)
-
-    id_compte.short_description = 'ID / Compte'
-    id_compte.admin_order_field = 'id'
 
     actions = ['annuler_et_prolonger']
 
@@ -750,10 +744,11 @@ class LeaseAdmin(admin.ModelAdmin):
 
 
 @admin.register(Paiement)
-class PaiementAdmin(admin.ModelAdmin):
+class PaiementAdmin(IdCompteAdminMixin, admin.ModelAdmin):
     list_display = (
-        'contrat', 'lease', 'agence', 'enregistre_par', 'nom_complet',
-        'session', 'methode', 'statut', 'date_paiement', 'created_at',
+        'id_compte', 'contrat', 'lease', 'agence', 'enregistre_par',
+        'nom_complet', 'session', 'methode', 'statut', 'date_paiement',
+        'created_at',
     )
     # Évite le N+1 queries : chaque colonne ci-dessus appelle le __str__ d'une FK différente
     list_select_related = (
@@ -768,7 +763,8 @@ class PaiementAdmin(admin.ModelAdmin):
         'nom_complet',
         'session__reference',
         'agence__code',
-        'agence__nom',
+        'agence__nom_search',
+        'agence__zone_search',
     )
     raw_id_fields = ('contrat', 'lease', 'enregistre_par', 'session')
     readonly_fields = (
@@ -782,8 +778,8 @@ class PaiementAdmin(admin.ModelAdmin):
 
 
 @admin.register(Parametre)
-class ParametreAdmin(admin.ModelAdmin):
-    list_display = ('compte_id', 'jours_repos_display', 'updated_at')
+class ParametreAdmin(IdCompteAdminMixin, admin.ModelAdmin):
+    list_display = ('id_compte', 'jours_repos_display', 'updated_at')
     list_filter = ('compte_id',)
     search_fields = ('compte_id',)
     readonly_fields = ('created_at', 'updated_at')
@@ -804,8 +800,10 @@ class ParametreAdmin(admin.ModelAdmin):
 # ==========================================
 
 @admin.register(ReglePenalite)
-class ReglePenaliteAdmin(admin.ModelAdmin):
-    list_display = ('nom', 'montant', 'frequence', 'occurrences', 'debut', 'compte_id')
+class ReglePenaliteAdmin(IdCompteAdminMixin, admin.ModelAdmin):
+    list_display = (
+        'id_compte', 'nom', 'montant', 'frequence', 'occurrences', 'debut',
+    )
     list_filter = ('frequence', 'compte_id')
     search_fields = ('nom', 'nom_search')
     readonly_fields = ('nom_search', 'created_at', 'updated_at')
@@ -828,11 +826,11 @@ class ReglePenaliteAdmin(admin.ModelAdmin):
 
 
 @admin.register(RegleGenerationLease)
-class RegleGenerationLeaseAdmin(admin.ModelAdmin):
+class RegleGenerationLeaseAdmin(IdCompteAdminMixin, admin.ModelAdmin):
     form = RegleGenerationLeaseAdminForm
     list_display = (
+        'id_compte',
         'nom',
-        'compte_id',
         'frequence',
         'cron_expression',
         'debut',
@@ -891,10 +889,10 @@ class RegleGenerationLeaseAdmin(admin.ModelAdmin):
 
 
 @admin.register(Penalite)
-class PenaliteAdmin(admin.ModelAdmin):
+class PenaliteAdmin(IdCompteAdminMixin, admin.ModelAdmin):
     list_display = (
-        'nom_complet', 'montant', 'statut', 'date_application',
-        'lease', 'agence', 'compte_id',
+        'id_compte', 'nom_complet', 'montant', 'statut',
+        'date_application', 'lease', 'agence',
     )
     list_filter = ('statut', 'compte_id', 'agence', 'date_application')
     list_select_related = ('lease', 'agence')
@@ -906,7 +904,8 @@ class PenaliteAdmin(admin.ModelAdmin):
         'motif',
         'lease__contrat__reference',
         'agence__code',
-        'agence__nom',
+        'agence__nom_search',
+        'agence__zone_search',
     )
 
     # raw_id_fields indispensable car il peut y avoir des milliers d'échéances

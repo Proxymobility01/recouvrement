@@ -56,9 +56,11 @@ class AgenceViewSet(TenantModelViewSet):
         filters.SearchFilter,
         filters.OrderingFilter,
     ]
-    filterset_fields = ['actif']
-    search_fields = ['nom', 'code', 'adresse', 'telephone', 'email']
-    ordering_fields = ['nom', 'code', 'actif', 'created_at']
+    filterset_fields = ['actif', 'zone']
+    search_fields = [
+        'nom_search', 'zone_search', 'code', 'adresse', 'telephone', 'email',
+    ]
+    ordering_fields = ['nom', 'zone', 'code', 'actif', 'created_at']
     ordering = ['nom']
 
     def perform_create(self, serializer):
@@ -110,7 +112,11 @@ class ContratViewSet(TenantModelViewSet):
     pagination_class = StandardResultsSetPagination
     filter_backends = [filters.SearchFilter, filters.OrderingFilter, DjangoFilterBackend]
     filterset_class = ContratFilter
-    search_fields = ['reference', 'vin', 'immatriculation', 'chauffeur__nom_complet','enregistre_par__nom_complet','agence__nom_search','agence__code']
+    search_fields = [
+        'reference', 'vin', 'immatriculation', 'chauffeur__nom_complet',
+        'enregistre_par__nom_complet', 'agence__nom_search',
+        'agence__zone_search', 'agence__code',
+    ]
     ordering_fields = ['created_at', 'statut',]
     ordering = ['-created_at']
     def get_queryset(self):
@@ -383,7 +389,10 @@ class LeaseViewSet(TenantModelViewSet):
     permission_classes = [IsAuthenticated, StrictDjangoModelPermissions]
     filterset_class = LeaseFilter
     filter_backends = [DjangoFilterBackend, filters.OrderingFilter, filters.SearchFilter]
-    search_fields = ['nom_complet_search','agence__nom_search','agence__code']
+    search_fields = [
+        'nom_complet_search', 'agence__nom_search',
+        'agence__zone_search', 'agence__code',
+    ]
     ordering_fields = ['date_echeance', 'created_at']
     ordering = ['-date_echeance']
 
@@ -843,7 +852,10 @@ class PaiementViewSet(TenantModelViewSet):
     pagination_class = StandardResultsSetPagination
     filter_backends = [DjangoFilterBackend, filters.OrderingFilter, filters.SearchFilter]
     filterset_class = PaiementFilter
-    search_fields = ['reference', 'nom_complet_search', '^session__telephone','agence__nom_search','agence__code']
+    search_fields = [
+        'reference', 'nom_complet_search', '^session__telephone',
+        'agence__nom_search', 'agence__zone_search', 'agence__code',
+    ]
     ordering_fields = ['date_paiement', 'created_at']
     ordering = ['-date_paiement']
 
@@ -1062,7 +1074,10 @@ class PenaliteViewSet(TenantModelViewSet):
         filters.OrderingFilter
     ]
     filterset_class = PenaliteFilter
-    search_fields = ['nom_complet_search']
+    search_fields = [
+        'nom_complet_search', 'agence__nom_search',
+        'agence__zone_search', 'agence__code',
+    ]
     ordering = ['-date_application']
 
     def get_queryset(self):
@@ -1089,7 +1104,10 @@ class SessionPaiementViewSet(TenantModelViewSet):
         filters.OrderingFilter,
     ]
     filterset_class = SessionPaiementFilter
-    search_fields = ['reference', 'telephone','agence__nom']
+    search_fields = [
+        'reference', 'telephone', 'agence__nom_search',
+        'agence__zone_search', 'agence__code',
+    ]
     ordering_fields = ['created_at', 'montant_total', 'date_validation']
     ordering = ['-created_at']
 
@@ -1185,7 +1203,6 @@ class RegleGenerationLeaseViewSet(TenantModelViewSet):
         else:
             etat = 'PLANIFIEE'
 
-        derniere_execution = self._serialiser_execution(derniere_tache)
         return {
             'regle_id': regle.id,
             'nom': regle.nom,
@@ -1201,9 +1218,11 @@ class RegleGenerationLeaseViewSet(TenantModelViewSet):
                 if derniere_tache is not None
                 else None
             ),
+            'statut_derniere_execution': (
+                'SUCCES' if derniere_tache.success else 'ECHEC'
+            ) if derniere_tache is not None else None,
             'cron_expression': schedule.cron if schedule else None,
             'repeats': schedule.repeats if schedule else None,
-            'derniere_execution': derniere_execution,
         }
 
     @action(detail=False, methods=['get'], url_path='planifications')

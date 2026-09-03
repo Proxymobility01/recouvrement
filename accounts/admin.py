@@ -1,4 +1,5 @@
 from django.contrib import admin
+from core.admin_mixins import IdCompteAdminMixin
 from .models import Role, CustomUser, CustomUserRole, ConfigPaiement
 
 
@@ -24,9 +25,11 @@ class CustomUserRoleInline(admin.TabularInline):
 
 
 @admin.register(CustomUser)
-class CustomUserAdmin(admin.ModelAdmin):
-    list_display = ('nom_complet', 'keycloak_id', 'email', 'compte_id', 'is_active', 'is_staff',
-                    'role_principal_display')
+class CustomUserAdmin(IdCompteAdminMixin, admin.ModelAdmin):
+    list_display = (
+        'id_compte', 'nom_complet', 'keycloak_id', 'email', 'is_active',
+        'is_staff', 'role_principal_display',
+    )
     search_fields = ('nom_complet', 'keycloak_id', 'email', 'compte_id')
     list_filter = ('is_active', 'is_staff', 'is_superuser', 'compte_id')
     readonly_fields = ('created_at', 'updated_at', 'nom_complet_search')
@@ -57,12 +60,14 @@ class CustomUserAdmin(admin.ModelAdmin):
 
 
 @admin.register(CustomUserRole)
-class CustomUserRoleAdmin(admin.ModelAdmin):
+class CustomUserRoleAdmin(IdCompteAdminMixin, admin.ModelAdmin):
     """
     Vue globale de toutes les affectations de rôles.
     Très utile pour chercher "Qui est admin dans le compte 5 ?".
     """
-    list_display = ('user', 'role', 'compte_id', 'principal', 'actif', 'created_at')
+    list_display = (
+        'id_compte', 'user', 'role', 'principal', 'actif', 'created_at',
+    )
     search_fields = ('user__nom_complet', 'user__keycloak_id', 'role__libelle')
     list_filter = ('actif', 'principal', 'role', 'compte_id')
     raw_id_fields = ('user', 'assigne_par')
@@ -71,10 +76,10 @@ class CustomUserRoleAdmin(admin.ModelAdmin):
 
 
 @admin.register(ConfigPaiement)
-class ConfigPaiementAdmin(admin.ModelAdmin):
+class ConfigPaiementAdmin(IdCompteAdminMixin, admin.ModelAdmin):
     list_display = (
+        'id_compte',
         'nom',
-        'compte_id',
         'actif',
         'defaut',
         'base_url',
