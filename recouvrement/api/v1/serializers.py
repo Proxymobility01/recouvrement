@@ -6,7 +6,7 @@ from django.utils import timezone
 from rest_framework import serializers
 from decimal import Decimal
 from django_q.models import Schedule
-from recouvrement.models import Contrat, Lease, Paiement, TypeContrat, Parametre, ReglePenalite, Penalite, \
+from recouvrement.models import Agence, Contrat, Lease, Paiement, TypeContrat, Parametre, ReglePenalite, Penalite, \
     SessionPaiement, RegleGenerationLease
 
 
@@ -30,6 +30,100 @@ class DateSeulementEnLectureMixin:
                 valeur = timezone.localtime(valeur)
             representation[champ] = valeur.date().isoformat()
         return representation
+
+
+class ValidationRegleGenerationContratMixin:
+    """Valide qu'une règle de génération appartient au compte du contrat."""
+
+    def _compte_id_cible_regle_generation(self):
+        compte_id = self.context.get('compte_id')
+        if compte_id is None:
+            compte_id = getattr(self.instance, 'compte_id', None)
+
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        if user is None:
+            return compte_id
+
+        if user.is_superuser:
+            return request.data.get('compte_id', compte_id)
+        return user.compte_id
+
+    def validate_regle_generation(self, value):
+        if value is None:
+            return value
+
+        compte_id = self._compte_id_cible_regle_generation()
+        if compte_id is not None and value.compte_id != int(compte_id):
+            raise serializers.ValidationError(
+                "La règle de génération doit appartenir au même compte "
+                "que le contrat."
+            )
+        return value
+
+
+class AgenceSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Agence
+        fields = [
+            'id',
+            'compte_id',
+            'nom',
+            'code',
+            'adresse',
+            'telephone',
+            'email',
+            'actif',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = [
+            'id',
+            'compte_id',
+            'created_at',
+            'updated_at',
+        ]
+
+    def _compte_id_cible(self):
+        if self.instance is not None:
+            return self.instance.compte_id
+
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        if user is None:
+            return None
+        if user.is_superuser:
+            return request.data.get('compte_id')
+        return user.compte_id
+
+    def validate_nom(self, value):
+        nom = value.strip()
+        if not nom:
+            raise serializers.ValidationError(
+                "Le nom de l'agence est obligatoire."
+            )
+        return nom
+
+    def validate_code(self, value):
+        code = value.strip().upper()
+        if not code:
+            raise serializers.ValidationError(
+                "Le code de l'agence est obligatoire."
+            )
+
+        compte_id = self._compte_id_cible()
+        if compte_id is not None:
+            agences = Agence.objects.filter(
+                compte_id=compte_id,
+                code__iexact=code,
+            )
+            if self.instance is not None:
+                agences = agences.exclude(pk=self.instance.pk)
+            if agences.exists():
+                raise serializers.ValidationError(
+                    "Ce code d'agence existe déjà pour ce compte."
+                )
+        return code
 
 
 class TypeContratSerializer(serializers.ModelSerializer):
@@ -72,6 +166,7 @@ class TypeContratSerializer(serializers.ModelSerializer):
 
 class SousContratSerializer(
     DateSeulementEnLectureMixin,
+    ValidationRegleGenerationContratMixin,
     serializers.ModelSerializer,
 ):
     """
@@ -87,9 +182,13 @@ class SousContratSerializer(
         fields = [
             'id','reference', 'type_contrat', 'montant_total','montant_restant','montant_paye', 'montant_par_paiement',
             'frequence', 'date_debut', 'date_fin', 'prochaine_echeance',
-             'statut', 'specificites'
+             'statut', 'specificites', 'regle_generation',
+            'config_paiement'
         ]
-        read_only_fields = ['id', 'reference', 'statut', 'montant_restant']
+        read_only_fields = [
+            'id', 'reference', 'statut', 'montant_restant',
+            'config_paiement',
+        ]
         extra_kwargs = {
             'montant_total': {'required': True},
             'montant_par_paiement': {'required': True},
@@ -115,27 +214,47 @@ class SousContratSerializer(
         return attrs
 
 
-class ContratSerializer(DateSeulementEnLectureMixin, serializers.ModelSerializer):
+class ContratSerializer(
+    DateSeulementEnLectureMixin,
+    ValidationRegleGenerationContratMixin,
+    serializers.ModelSerializer,
+):
     enregistre_par_nom_complet = serializers.CharField(source='enregistre_par.nom_complet', read_only=True)
     chauffeur_nom_complet = serializers.CharField(source='chauffeur.nom_complet', read_only=True)
     specificites = serializers.JSONField(required=False, allow_null=True)
     type_contrat_libelle = serializers.CharField(source='type_contrat.libelle', read_only=True)
+    agence_nom = serializers.CharField(
+        source='agence.nom',
+        read_only=True,
+        default=None,
+    )
     montant_paye = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, default=0)
+    agence = serializers.PrimaryKeyRelatedField(
+        queryset=Agence.objects.all(),
+        required=False,
+        allow_null=True,
+        error_messages={
+            'does_not_exist': "L'agence sélectionnée n'existe pas.",
+            'incorrect_type': "L'identifiant de l'agence doit être un nombre entier."
+        }
+    )
     champs_datetime_en_date = ('prochaine_echeance',)
 
     class Meta:
         model = Contrat
         fields = [
             'id', 'reference', 'compte_id', 'chauffeur', 'immatriculation', 'vin', 'nom_complet',
-            'type_contrat', 'type_contrat_libelle', 'parent',
+            'type_contrat', 'type_contrat_libelle', 'parent','agence', 'agence_nom',
             'enregistre_par', 'enregistre_par_nom_complet', 'chauffeur_nom_complet',
             'montant_total', 'montant_restant', 'montant_paye', 'montant_par_paiement',
             'frequence', 'date_debut', 'date_fin', 'prochaine_echeance',
-            'statut', 'specificites', 'config_paiement', 'created_at', 'updated_at'
+            'statut', 'specificites', 'regle_generation',
+            'config_paiement', 'created_at', 'updated_at'
         ]
         read_only_fields = [
             'reference', 'montant_restant', 'enregistre_par',
-            'created_at', 'updated_at', 'nom_complet', 'compte_id'
+            'created_at', 'updated_at', 'nom_complet', 'compte_id',
+            'config_paiement',
         ]
         extra_kwargs = {
             'montant_total': {'required': True},
@@ -166,23 +285,49 @@ class ContratSerializer(DateSeulementEnLectureMixin, serializers.ModelSerializer
 
         return value
 
-    def validate_config_paiement(self, value):
-        if value is None:
-            return value
-
+    def validate_agence(self, value):
+        """
+        S'assure que l'agence appartient à l'entreprise et empêche la modification
+        si le contrat a déjà propagé son agence sur des données financières.
+        """
         request = self.context.get('request')
         compte_id = getattr(self.instance, 'compte_id', None)
+
         if request and getattr(request, 'user', None):
             if request.user.is_superuser:
                 compte_id = request.data.get('compte_id', compte_id)
             else:
                 compte_id = request.user.compte_id
 
-        if compte_id is not None and value.compte_id != int(compte_id):
+        if value is not None and compte_id is not None and value.compte_id != int(compte_id):
             raise serializers.ValidationError(
-                "La configuration de paiement doit appartenir au même "
-                "compte que le contrat."
+                "L'agence spécifiée n'appartient pas à votre entreprise."
             )
+
+        # 🔒 MUR DE SÉCURITÉ : Blocage de modification si propagation existante
+        if self.instance and self.instance.agence != value:
+
+            # 1. Vérification sur le contrat parent
+            a_des_leases = self.instance.leases.exists()
+            a_des_paiements = self.instance.paiements.exists()
+
+            if a_des_leases or a_des_paiements:
+                raise serializers.ValidationError(
+                    "Modification impossible : Ce contrat a déjà généré des données "
+                    "financières (échéances ou paiements) rattachées à l'agence actuelle."
+                )
+
+            # 2. Vérification sur tous les sous-contrats
+            if self.instance.sous_contrats.exists():
+                has_sub_leases = self.instance.sous_contrats.filter(leases__isnull=False).exists()
+                has_sub_payments = self.instance.sous_contrats.filter(paiements__isnull=False).exists()
+
+                if has_sub_leases or has_sub_payments:
+                    raise serializers.ValidationError(
+                        "Modification impossible : Un des sous-contrats a déjà généré des données "
+                        "financières rattachées à l'agence actuelle."
+                    )
+
         return value
 
     def get_fields(self):
@@ -196,6 +341,15 @@ class ContratSerializer(DateSeulementEnLectureMixin, serializers.ModelSerializer
 
         parent = attrs.get('parent', getattr(self.instance, 'parent', None))
         chauffeur = attrs.get('chauffeur', getattr(self.instance, 'chauffeur', None))
+        agence = attrs.get('agence', getattr(self.instance, 'agence', None))
+
+        if parent is not None and getattr(agence, 'id', None) != parent.agence_id:
+            raise serializers.ValidationError({
+                'agence': (
+                    "Un sous-contrat doit toujours appartenir à la même "
+                    "agence que son contrat parent."
+                )
+            })
 
         if not parent:
             # On cherche s'il existe déjà un contrat parent actif pour ce chauffeur
@@ -253,11 +407,18 @@ class ContratSerializer(DateSeulementEnLectureMixin, serializers.ModelSerializer
         with transaction.atomic():
             parent_contrat = super().create(validated_data)
             for sc_data in sous_contrats_data:
-                sc_serializer = SousContratSerializer(data=sc_data)
+                sc_serializer = SousContratSerializer(
+                    data=sc_data,
+                    context={
+                        **self.context,
+                        'compte_id': parent_contrat.compte_id,
+                    },
+                )
                 sc_serializer.is_valid(raise_exception=True)
 
                 sc_instance_data = sc_serializer.validated_data
                 sc_instance_data['parent'] = parent_contrat
+                sc_instance_data['agence'] = parent_contrat.agence
                 sc_instance_data['chauffeur'] = parent_contrat.chauffeur
                 sc_instance_data['compte_id'] = parent_contrat.compte_id
                 sc_instance_data['nom_complet'] = parent_contrat.nom_complet
@@ -279,7 +440,7 @@ class ContratSerializer(DateSeulementEnLectureMixin, serializers.ModelSerializer
         chauffeur = validated_data.get('chauffeur')
         if chauffeur:
             validated_data['nom_complet'] = chauffeur.nom_complet
-
+        ancienne_agence = instance.agence
         # 🚀 LOGIQUE FINANCIÈRE SÉCURISÉE (Mise à jour)
         new_total = validated_data.get('montant_total', instance.montant_total)
         new_paye = validated_data.get('montant_paye', instance.montant_paye)
@@ -291,7 +452,21 @@ class ContratSerializer(DateSeulementEnLectureMixin, serializers.ModelSerializer
             if validated_data['montant_restant'] == 0:
                 validated_data['statut'] = Contrat.STATUT_SOLDE
 
-        return super().update(instance, validated_data)
+        with transaction.atomic():
+            updated_instance = super().update(instance, validated_data)
+
+            # 🏢 PROPAGATION DE LA MODIFICATION DE L'AGENCE AUX SOUS-CONTRATS
+            # (Cette étape n'est atteinte que si la validation de sécurité a réussi plus haut)
+            nouvelle_agence = updated_instance.agence
+
+            if ancienne_agence != nouvelle_agence:
+                # Si l'agence a changé, on met à jour tous les sous-contrats en une seule requête SQL
+                updated_instance.sous_contrats.update(
+                    agence=nouvelle_agence,
+                    updated_at=timezone.now(),
+                )
+
+        return updated_instance
 
 
 class LeaseSerializer(DateSeulementEnLectureMixin, serializers.ModelSerializer):
@@ -299,6 +474,11 @@ class LeaseSerializer(DateSeulementEnLectureMixin, serializers.ModelSerializer):
     contrat_id = serializers.IntegerField(source='contrat.id', read_only=True)
     compte_id = serializers.IntegerField(source='contrat.compte_id', read_only=True)
     type_contrat_libelle = serializers.CharField(source='contrat.type_contrat.libelle', read_only=True)
+    agence_nom = serializers.CharField(
+        source='agence.nom',
+        read_only=True,
+        default=None,
+    )
     reste_a_payer = serializers.SerializerMethodField()
     champs_datetime_en_date = ('date_echeance',)
 
@@ -308,6 +488,8 @@ class LeaseSerializer(DateSeulementEnLectureMixin, serializers.ModelSerializer):
             'id',
             'compte_id',
             'contrat_id',
+            'agence',
+            'agence_nom',
             'chauffeur_nom_complet',
             'type_contrat_libelle',
             'date_echeance',
@@ -470,17 +652,24 @@ class PaiementSerializer(serializers.ModelSerializer):
 
     chauffeur_nom_complet = serializers.CharField(source='contrat.nom_complet', read_only=True)
     enregistre_par = serializers.CharField(source='enregistre_par.nom_complet', read_only=True)
+    agence = serializers.PrimaryKeyRelatedField(read_only=True)
+    agence_nom = serializers.CharField(
+        source='agence.nom',
+        read_only=True,
+        default=None,
+    )
 
     class Meta:
         model = Paiement
         fields = [
-            'id', 'lease_id', 'montant', 'methode',
+            'id', 'lease_id', 'agence', 'agence_nom', 'montant', 'methode',
             'transaction_id', 'statut', 'date_paiement',
             'chauffeur_nom_complet', 'enregistre_par'
         ]
         read_only_fields = [
             'methode', 'transaction_id', 'statut',
-            'date_paiement', 'chauffeur_nom_complet', 'enregistre_par'
+            'date_paiement', 'chauffeur_nom_complet', 'enregistre_par',
+            'agence', 'agence_nom',
         ]
 
     def validate(self, attrs):
@@ -661,14 +850,20 @@ class ReglePenaliteSerializer(serializers.ModelSerializer):
             data['cron_expression'] = None
 
         return data
-
-
 class PenaliteSerializer(serializers.ModelSerializer):
+    agence_nom = serializers.CharField(
+        source='agence.nom',
+        read_only=True,
+        default=None,
+    )
+
     class Meta:
         model = Penalite
         fields = [
             'id',
             'lease',
+            'agence',
+            'agence_nom',
             'nom_complet',
             'montant',
             'date_application',
@@ -676,7 +871,7 @@ class PenaliteSerializer(serializers.ModelSerializer):
             'created_at'
         ]
         read_only_fields = [
-            'id', 'lease', 'nom_complet', 'montant',
+            'id', 'lease', 'agence', 'agence_nom', 'nom_complet', 'montant',
             'date_application', 'motif', 'created_at'
         ]
 
@@ -684,6 +879,11 @@ class PenaliteSerializer(serializers.ModelSerializer):
 class SessionPaiementSerializer(serializers.ModelSerializer):
     config_paiement_nom = serializers.CharField(
         source='config_paiement.nom',
+        read_only=True,
+        default=None,
+    )
+    agence_nom = serializers.CharField(
+        source='agence.nom',
         read_only=True,
         default=None,
     )
@@ -696,6 +896,8 @@ class SessionPaiementSerializer(serializers.ModelSerializer):
             'statut',
             'montant_total',
             'telephone',
+            'agence',
+            'agence_nom',
             'config_paiement',
             'config_paiement_nom',
             'date_validation',
@@ -709,28 +911,36 @@ class AssignerRegleSerializer(serializers.Serializer):
         child=serializers.IntegerField(),
         allow_empty=False,
     )
+
     def validate_contrat_ids(self, value):
-        user = self.context['request'].user
-        ids_uniques = list(set(value))
+        compte_id_cible = self.context.get('compte_id_cible')
+        if compte_id_cible is None:
+            raise AssertionError(
+                "Le compte cible de la règle doit être fourni au serializer."
+            )
+
+        # Déduplique sans modifier l'ordre reçu afin de produire des erreurs
+        # prévisibles pour le client.
+        ids_uniques = list(dict.fromkeys(value))
 
         # Une seule requête qui récupère les IDs valides
-        ids_valides = list(
+        ids_valides = set(
             Contrat.objects.filter(
                 id__in=ids_uniques,
-                compte_id=user.compte_id
-            ).exclude(
-                statut__in=[
-                    Contrat.STATUT_SOLDE,
-                    Contrat.STATUT_CONTENTIEUX,
-                    Contrat.STATUT_SUSPENDU
-                ]
+                compte_id=compte_id_cible,
+                statut__in=Contrat.STATUTS_ASSIGNABLES_REGLE_GENERATION,
             ).values_list('id', flat=True)
         )
 
-        ids_invalides = [cid for cid in ids_uniques if cid not in ids_valides]
+        ids_invalides = [
+            contrat_id
+            for contrat_id in ids_uniques
+            if contrat_id not in ids_valides
+        ]
         if ids_invalides:
             raise serializers.ValidationError(
-                f"Contrats introuvables ou invalides : {ids_invalides}"
+                "Contrats introuvables, non actifs ou appartenant à un autre "
+                f"compte : {ids_invalides}"
             )
 
         return ids_uniques
@@ -759,6 +969,7 @@ class RegleGenerationLeaseSerializer(serializers.ModelSerializer):
             'cron_expression',
             'debut',
             'actif',
+            'defaut',
             'created_at',
             'updated_at'
         ]
@@ -806,17 +1017,43 @@ class RegleGenerationLeaseSerializer(serializers.ModelSerializer):
     def validate_cron_expression(self, value):
         """
         Valide que l'expression Cron correspond au format standard (5 parties).
-        Exemples valides : "* * * * *", "0 14,16 * * *", "*/15 * * * 1-5"
+        Vérifie également que cette expression est unique pour l'entreprise.
         """
         if value:
             expression = value.strip()
+
+            # 1. Validation du format
             if (
-                len(expression.split()) != 5
-                or not croniter.is_valid(expression)
+                    len(expression.split()) != 5
+                    or not croniter.croniter.is_valid(expression)
             ):
                 raise serializers.ValidationError(
                     "Format Cron invalide. L'expression doit contenir 5 parties (ex: '0 12,22 * * *')."
                 )
+
+            # 2. 🛡️ Validation d'unicité (Empêcher les doublons CRON)
+            request = self.context.get('request')
+            compte_id = getattr(self.instance, 'compte_id', None)
+
+            if request and getattr(request, 'user', None):
+                if request.user.is_superuser:
+                    compte_id = request.data.get('compte_id', compte_id)
+                else:
+                    compte_id = request.user.compte_id
+
+            if compte_id is not None:
+                regles_existantes = RegleGenerationLease.objects.filter(
+                    compte_id=compte_id,
+                    cron_expression=expression
+                )
+                if self.instance:
+                    regles_existantes = regles_existantes.exclude(pk=self.instance.pk)
+
+                if regles_existantes.exists():
+                    raise serializers.ValidationError(
+                        "Une règle utilisant cette expression Cron exacte existe déjà."
+                    )
+
             return expression
         return value
 

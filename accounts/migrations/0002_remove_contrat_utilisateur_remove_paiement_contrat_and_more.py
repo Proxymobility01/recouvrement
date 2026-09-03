@@ -10,18 +10,6 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.RemoveField(
-            model_name='contrat',
-            name='utilisateur',
-        ),
-        migrations.RemoveField(
-            model_name='paiement',
-            name='contrat',
-        ),
-        migrations.RemoveField(
-            model_name='paiement',
-            name='utilisateur',
-        ),
         migrations.RenameIndex(
             model_name='customuser',
             new_name='account_cus_compte__2fa600_idx',
@@ -58,11 +46,5 @@ class Migration(migrations.Migration):
         migrations.AlterModelTable(
             name='role',
             table='account_role',
-        ),
-        migrations.DeleteModel(
-            name='Contrat',
-        ),
-        migrations.DeleteModel(
-            name='Paiement',
         ),
     ]

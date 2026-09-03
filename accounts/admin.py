@@ -76,12 +76,13 @@ class ConfigPaiementAdmin(admin.ModelAdmin):
         'nom',
         'compte_id',
         'actif',
+        'defaut',
         'base_url',
         'created_at',
         'updated_at',
     )
     search_fields = ('nom', 'compte_id', 'base_url')
-    list_filter = ('actif', 'compte_id', 'created_at')
+    list_filter = ('actif', 'defaut', 'compte_id', 'created_at')
     readonly_fields = ('created_at', 'updated_at')
     ordering = ('compte_id', 'nom')
 
@@ -93,7 +94,7 @@ class ConfigPaiementAdmin(admin.ModelAdmin):
 
     fieldsets = (
         ('Informations Générales', {
-            'fields': ('compte_id', 'nom', 'actif')
+            'fields': ('compte_id', 'nom', 'actif', 'defaut')
         }),
         ('Configuration API (PayGate)', {
             'fields': ('api_key', 'base_url', 'success_url')

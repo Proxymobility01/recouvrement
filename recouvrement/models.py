@@ -1,12 +1,13 @@
 import secrets
 from django.db.models import Q
 from decimal import Decimal
-from django.contrib.postgres.indexes import GinIndex
+from django.contrib.postgres.indexes import BTreeIndex, GinIndex
+from django.core.exceptions import ValidationError
 from django.core.validators import MinValueValidator
 from django.db import models, transaction
 from django.utils import timezone
 from django_q.models import Schedule
-from accounts.models import BaseModel, CustomUser
+from accounts.models import BaseModel, ConfigPaiement, CustomUser
 from core.utils import remove_accents
 
 
@@ -14,6 +15,83 @@ from core.utils import remove_accents
 # ==========================================
 # 4. LOGIQUE MÉTIER : CONTRATS
 # ==========================================
+class Agence(BaseModel):
+    """Agence opérationnelle appartenant à un compte partenaire."""
+
+    nom = models.CharField(max_length=150)
+    nom_search = models.CharField(max_length=255, null=True, blank=True)
+    code = models.SlugField(max_length=50)
+    adresse = models.TextField(blank=True)
+    telephone = models.CharField(max_length=20, blank=True)
+    email = models.EmailField(blank=True)
+    actif = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = "rc_agence"
+        verbose_name = "Agence"
+        verbose_name_plural = "Agences"
+        constraints = [
+            models.UniqueConstraint(
+                fields=['compte_id', 'code'],
+                name='unique_agence_code_par_compte',
+            ),
+        ]
+        indexes = [
+            GinIndex(fields=['nom_search'], name='idx_agence_nom_search_trgm', opclasses=['gin_trgm_ops']),
+            models.Index(
+                fields=['compte_id', 'actif'],
+                name='idx_agence_compte_actif',
+            ),
+        ]
+
+    def save(self, *args, **kwargs):
+        # 1. Nettoyage des champs de base
+        if self.nom:
+            self.nom = self.nom.strip()
+            # Génération du champ de recherche sans accents et en minuscules
+            self.nom_search = remove_accents(self.nom).lower()
+        else:
+            self.nom_search = ""
+
+        if self.code:
+            self.code = self.code.strip().upper()
+
+        # 2. Gestion intelligente des update_fields pour les performances
+        update_fields = kwargs.get('update_fields')
+        if update_fields is not None:
+            update_fields = set(update_fields)
+
+            # Si on modifie le nom, on force la sauvegarde du nom_search
+            if 'nom' in update_fields:
+                update_fields.add('nom_search')
+
+            kwargs['update_fields'] = list(update_fields)
+
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.code} - {self.nom}"
+
+
+class AgenceScopedModel(BaseModel):
+    """Base abstraite des données opérationnelles rattachées à une agence."""
+
+    agence = models.ForeignKey(
+        Agence,
+        on_delete=models.PROTECT,
+        related_name="%(app_label)s_%(class)ss",
+        null=True,
+        blank=True,
+        help_text=(
+            "Agence propriétaire de cette donnée. Le champ reste "
+            "temporairement facultatif pendant la reprise de l'historique."
+        ),
+    )
+
+    class Meta:
+        abstract = True
+
+
 class TypeContrat(BaseModel):
     """
     Permet de créer des types de contrats à l'infini (GPS, Parapluie, etc.)
@@ -47,12 +125,16 @@ class TypeContrat(BaseModel):
         return self.libelle
 
 
-class Contrat(BaseModel):
+class Contrat(AgenceScopedModel):
     # --- Constantes de Statut ---
     STATUT_ACTIF = 'ACTIF'
     STATUT_SUSPENDU = 'SUSPENDU'
     STATUT_SOLDE = 'SOLDE'
     STATUT_CONTENTIEUX = 'CONTENTIEUX'
+
+    # Une règle de génération ne peut être attribuée en masse qu'aux
+    # contrats susceptibles de générer des leases.
+    STATUTS_ASSIGNABLES_REGLE_GENERATION = (STATUT_ACTIF,)
 
 
     JOURNALIER = 'JOURNALIER'
@@ -232,6 +314,77 @@ class Contrat(BaseModel):
             # On formate sur 5 chiffres (ex: 1 devient 00001)
             return f"{prefix}{nouvelle_sequence:05d}"
     def save(self, *args, **kwargs):
+        est_creation = self._state.adding
+        ancienne_config_paiement_id = None
+        if not est_creation and self.parent_id is None:
+            ancienne_config_paiement_id = (
+                type(self).objects
+                .filter(pk=self.pk)
+                .values_list('config_paiement_id', flat=True)
+                .first()
+            )
+
+        update_fields = kwargs.get('update_fields')
+        if update_fields is not None:
+            update_fields = set(update_fields)
+
+        # Chaque contrat (parent ou sous-contrat) choisit sa règle de manière
+        # indépendante. Une règle explicite est conservée ; sinon, uniquement
+        # lors de la création, on utilise la règle par défaut de son compte.
+        if (
+            self._state.adding
+            and self.regle_generation_id is None
+            and self.compte_id is not None
+        ):
+            self.regle_generation = (
+                RegleGenerationLease.objects
+                .filter(compte_id=self.compte_id, defaut=True)
+                .first()
+            )
+            if update_fields is not None:
+                update_fields.add('regle_generation')
+
+        # Un sous-contrat hérite toujours de l'agence et de la configuration
+        # de paiement de son parent. Ces deux attributs ne sont jamais choisis
+        # indépendamment au niveau du sous-contrat.
+        if self.parent_id:
+            agence_parent_id = self.parent.agence_id
+            if self.agence_id != agence_parent_id:
+                self.agence_id = agence_parent_id
+                if update_fields is not None:
+                    update_fields.add('agence')
+
+            config_parent_id = self.parent.config_paiement_id
+            if self.config_paiement_id != config_parent_id:
+                self.config_paiement_id = config_parent_id
+                if update_fields is not None:
+                    update_fields.add('config_paiement')
+        elif (
+            est_creation
+            and self.config_paiement_id is None
+            and self.compte_id is not None
+        ):
+            # Une configuration explicitement choisie sur le parent reste
+            # prioritaire. Sinon, le défaut du compte est appliqué.
+            self.config_paiement = (
+                ConfigPaiement.objects
+                .filter(compte_id=self.compte_id, defaut=True)
+                .first()
+            )
+            if update_fields is not None:
+                update_fields.add('config_paiement')
+
+        if (
+            self.config_paiement_id is not None
+            and self.config_paiement.compte_id != self.compte_id
+        ):
+            raise ValidationError({
+                'config_paiement': (
+                    "La configuration de paiement doit appartenir au même "
+                    "compte que le contrat."
+                ),
+            })
+
         if not self.reference:
             self.reference = self.generer_reference()
         if self.nom_complet:
@@ -240,9 +393,7 @@ class Contrat(BaseModel):
             self.nom_complet_search = ""
 
         # S'assure que si on met à jour uniquement 'nom_complet', on met aussi à jour la recherche
-        update_fields = kwargs.get('update_fields')
         if update_fields is not None:
-            update_fields = set(update_fields)
             if 'nom_complet' in update_fields:
                 update_fields.add('nom_complet_search')
 
@@ -252,7 +403,23 @@ class Contrat(BaseModel):
 
             kwargs['update_fields'] = list(update_fields)
 
-        super().save(*args, **kwargs)
+        config_paiement_sauvegardee = (
+            update_fields is None or 'config_paiement' in update_fields
+        )
+
+        with transaction.atomic():
+            super().save(*args, **kwargs)
+
+            if (
+                not est_creation
+                and self.parent_id is None
+                and config_paiement_sauvegardee
+                and ancienne_config_paiement_id != self.config_paiement_id
+            ):
+                self.sous_contrats.update(
+                    config_paiement_id=self.config_paiement_id,
+                    updated_at=timezone.now(),
+                )
 
     @property
     def has_sous_contrat(self):
@@ -263,7 +430,7 @@ class Contrat(BaseModel):
         return self.sous_contrats.exists()
 
 
-class SessionPaiement(BaseModel):
+class SessionPaiement(AgenceScopedModel):
     """
     Représente un panier de paiement global regroupant plusieurs échéances.
     C'est cette référence qui est envoyée au fournisseur Mobile Money.
@@ -342,7 +509,7 @@ class SessionPaiement(BaseModel):
         return f"Session {self.reference} - {self.montant_total} XAF"
 
 
-class Lease(BaseModel):
+class Lease(AgenceScopedModel):
     # --- Constantes de Statut ---
     STATUT_NON_PAYE = 'NON_PAYE'
     STATUT_PARTIEL = 'PARTIEL'
@@ -392,23 +559,32 @@ class Lease(BaseModel):
         ]
 
     def save(self, *args, **kwargs):
-        # 1. On aspire le nom du contrat si on ne l'a pas encore
+        update_fields = kwargs.get('update_fields')
+        if update_fields is not None:
+            update_fields = set(update_fields)
+
+        # 🏢 1. Propagation automatique de l'agence
+        if not self.agence_id and self.contrat_id:
+            self.agence_id = self.contrat.agence_id
+            if update_fields is not None:
+                update_fields.add('agence')
+
+        # 2. On aspire le nom du contrat si on ne l'a pas encore
         if not self.nom_complet and self.contrat_id:
             self.nom_complet = self.contrat.nom_complet
+            if update_fields is not None:
+                update_fields.add('nom_complet')
 
-        # 2. On génère la version de recherche
+        # 3. On génère la version de recherche
         if self.nom_complet:
             self.nom_complet_search = remove_accents(self.nom_complet).lower()
         else:
             self.nom_complet_search = ""
 
-        # 3. Gestion des update_fields pour la performance
-        update_fields = kwargs.get('update_fields')
+        if update_fields is not None and 'nom_complet' in update_fields:
+            update_fields.add('nom_complet_search')
+
         if update_fields is not None:
-            update_fields = set(update_fields)
-            if 'nom_complet' in update_fields or 'contrat' in update_fields:
-                update_fields.add('nom_complet')
-                update_fields.add('nom_complet_search')
             kwargs['update_fields'] = list(update_fields)
 
         super().save(*args, **kwargs)
@@ -417,7 +593,7 @@ class Lease(BaseModel):
         return f"Lease {self.contrat.id} - {self.date_echeance} - {self.statut}"
 
 
-class Paiement(BaseModel):
+class Paiement(AgenceScopedModel):
     # --- Constantes de Méthode ---
     METHODE_MOBILE_MONEY = 'MOBILE_MONEY'
     METHODE_ESPECES = 'ESPECES'
@@ -462,25 +638,33 @@ class Paiement(BaseModel):
     nom_complet = models.CharField(max_length=255, null=True, blank=True)
     nom_complet_search = models.CharField(max_length=255, null=True, blank=True)
 
-
     def save(self, *args, **kwargs):
-        # 1. On aspire le nom depuis le contrat lié au paiement
+        update_fields = kwargs.get('update_fields')
+        if update_fields is not None:
+            update_fields = set(update_fields)
+
+        # 🏢 1. Propagation automatique de l'agence depuis le contrat
+        if not self.agence_id and self.contrat_id:
+            self.agence_id = self.contrat.agence_id
+            if update_fields is not None:
+                update_fields.add('agence')
+
+        # 2. On aspire le nom depuis le contrat
         if not self.nom_complet and self.contrat_id:
             self.nom_complet = self.contrat.nom_complet
+            if update_fields is not None:
+                update_fields.add('nom_complet')
 
-        # 2. On génère la version de recherche
+        # 3. On génère la version de recherche
         if self.nom_complet:
             self.nom_complet_search = remove_accents(self.nom_complet).lower()
         else:
             self.nom_complet_search = ""
 
-        # 3. Gestion des update_fields
-        update_fields = kwargs.get('update_fields')
+        if update_fields is not None and 'nom_complet' in update_fields:
+            update_fields.add('nom_complet_search')
+
         if update_fields is not None:
-            update_fields = set(update_fields)
-            if 'nom_complet' in update_fields or 'contrat' in update_fields:
-                update_fields.add('nom_complet')
-                update_fields.add('nom_complet_search')
             kwargs['update_fields'] = list(update_fields)
 
         super().save(*args, **kwargs)
@@ -607,7 +791,7 @@ class ReglePenalite(BaseModel):
         super().save(*args, **kwargs)
 
 
-class Penalite(BaseModel):
+class Penalite(AgenceScopedModel):
     STATUT_NON_PAYE = 'NON_PAYE'
     STATUT_PARTIEL = 'PARTIEL'
     STATUT_PAYE = 'PAYE'
@@ -682,21 +866,27 @@ class Penalite(BaseModel):
         return f"Pénalité de {self.montant} FCFA - {self.nom_complet} ({date_str})"
 
     def save(self, *args, **kwargs):
-        # 1. Génération automatique du champ de recherche nettoyé
+        update_fields = kwargs.get('update_fields')
+        if update_fields is not None:
+            update_fields = set(update_fields)
+
+        # 🏢 1. Propagation automatique de l'agence depuis le Lease
+        if not self.agence_id and self.lease_id:
+            # On utilise select_related si possible en amont, sinon ça fait une petite requête
+            self.agence_id = self.lease.agence_id
+            if update_fields is not None:
+                update_fields.add('agence')
+
+        # 2. Génération automatique du champ de recherche nettoyé
         if self.nom_complet:
             self.nom_complet_search = remove_accents(self.nom_complet).lower()
         else:
             self.nom_complet_search = ""
 
-        # 2. Gestion intelligente des update_fields pour ne pas rater la mise à jour
-        update_fields = kwargs.get('update_fields')
+        if update_fields is not None and 'nom_complet' in update_fields:
+            update_fields.add('nom_complet_search')
+
         if update_fields is not None:
-            update_fields = set(update_fields)
-
-            # Si le code tente de sauvegarder 'nom_complet', on force la sauvegarde de 'nom_complet_search'
-            if 'nom_complet' in update_fields:
-                update_fields.add('nom_complet_search')
-
             kwargs['update_fields'] = list(update_fields)
 
         super().save(*args, **kwargs)
@@ -748,6 +938,12 @@ class RegleGenerationLease(BaseModel):
         help_text="Si désactivé, AUCUN contrat lié à cette règle ne sera facturé."
     )
 
+    defaut = models.BooleanField(
+        default=False,
+        verbose_name="Règle par défaut",
+        help_text="Si coché, cette règle sera automatiquement appliquée aux nouveaux contrats."
+    )
+
     class Meta:
         db_table = "rc_regle_generation_lease"
         verbose_name = "Règle de génération de leases"
@@ -756,6 +952,11 @@ class RegleGenerationLease(BaseModel):
             models.UniqueConstraint(
                 fields=['compte_id', 'nom'],
                 name='unique_regle_generation_nom_par_compte',
+            ),
+            models.UniqueConstraint(
+                fields=['compte_id'],
+                condition=Q(defaut=True),
+                name='unique_regle_generation_defaut_par_compte',
             ),
         ]
         indexes = [
@@ -780,6 +981,12 @@ class RegleGenerationLease(BaseModel):
 
             kwargs['update_fields'] = list(update_fields)
 
-        super().save(*args, **kwargs)
+        with transaction.atomic():
+            if self.defaut:
+                RegleGenerationLease.objects.filter(
+                    compte_id=self.compte_id
+                ).exclude(pk=self.pk).update(defaut=False)
+
+            super().save(*args, **kwargs)
 
 

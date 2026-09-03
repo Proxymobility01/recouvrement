@@ -2,6 +2,7 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 
 from recouvrement.api.v1.views import (
+    AgenceViewSet,
     ContratViewSet,
     LeaseViewSet,
     InitiationPaiementView,
@@ -17,6 +18,7 @@ from recouvrement.api.v1.views import (
 router = DefaultRouter()
 
 
+router.register(r'agences', AgenceViewSet, basename='agence')
 router.register(r'contrats', ContratViewSet, basename='contrat')
 router.register(r'leases', LeaseViewSet, basename='lease')
 router.register(r'paiements', PaiementViewSet, basename='paiement')

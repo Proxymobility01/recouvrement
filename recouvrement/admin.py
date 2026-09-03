@@ -3,6 +3,7 @@ import datetime
 from django import forms
 from django.contrib import admin, messages
 from django.contrib.admin.helpers import ACTION_CHECKBOX_NAME
+from django.db import transaction
 from django.db.models import Count
 from django.shortcuts import render
 from django.utils import timezone
@@ -13,6 +14,7 @@ from rangefilter.filters import DateRangeFilter, DateRangeQuickSelectListFilter
 from accounts.models import ConfigPaiement
 from .services import annuler_leases_et_prolonger, AnnulationLeaseError
 from .models import (
+    Agence,
     TypeContrat,
     Contrat,
     SessionPaiement,
@@ -135,8 +137,68 @@ class ContratAdminForm(forms.ModelForm):
     def clean(self):
         cleaned_data = super().clean()
         compte_id = cleaned_data.get('compte_id')
+        agence = cleaned_data.get('agence')
+        parent = cleaned_data.get('parent')
         regle_generation = cleaned_data.get('regle_generation')
         config_paiement = cleaned_data.get('config_paiement')
+
+        if (
+            compte_id is not None
+            and agence is not None
+            and agence.compte_id != compte_id
+        ):
+            self.add_error(
+                'agence',
+                "L'agence doit appartenir au même compte que le contrat.",
+            )
+
+        if (
+            agence is not None
+            and not agence.actif
+            and self.instance.agence_id != agence.id
+        ):
+            self.add_error(
+                'agence',
+                "Une agence inactive ne peut pas recevoir un contrat.",
+            )
+
+        if parent is not None:
+            if agence is None:
+                agence = parent.agence
+                cleaned_data['agence'] = agence
+            elif parent.agence_id != agence.id:
+                self.add_error(
+                    'agence',
+                    "Un sous-contrat doit appartenir à l'agence de son parent.",
+                )
+
+            # La configuration de paiement est pilotée exclusivement par le
+            # contrat principal. À la création, toute valeur saisie sur le
+            # sous-contrat est donc remplacée par celle du parent.
+            config_paiement = parent.config_paiement
+            cleaned_data['config_paiement'] = config_paiement
+
+        agence_actuelle_id = getattr(self.instance, 'agence_id', None)
+        agence_demandee_id = agence.id if agence is not None else None
+        if (
+            self.instance.pk
+            and agence_demandee_id != agence_actuelle_id
+            and (
+                self.instance.leases.exists()
+                or self.instance.paiements.exists()
+                or self.instance.sous_contrats.filter(
+                    leases__isnull=False,
+                ).exists()
+                or self.instance.sous_contrats.filter(
+                    paiements__isnull=False,
+                ).exists()
+            )
+        ):
+            self.add_error(
+                'agence',
+                "L'agence ne peut plus être modifiée car ce contrat ou l'un "
+                "de ses sous-contrats possède déjà un historique financier.",
+            )
 
         if (
             compte_id is not None
@@ -217,6 +279,32 @@ class RegleGenerationLeaseAdminForm(forms.ModelForm):
 # 2. CONFIGURATION DES ADMINS
 # ==========================================
 
+@admin.register(Agence)
+class AgenceAdmin(admin.ModelAdmin):
+    list_display = (
+        'code',
+        'nom',
+        'compte_id',
+        'actif',
+        'created_at',
+    )
+    list_filter = ('actif', 'compte_id')
+    search_fields = ('code', 'nom', 'adresse', 'telephone', 'email')
+    readonly_fields = ('created_at', 'updated_at')
+    ordering = ('compte_id', 'nom')
+    fieldsets = (
+        ('Identification', {
+            'fields': ('compte_id', 'code', 'nom', 'actif')
+        }),
+        ('Coordonnées', {
+            'fields': ('adresse', 'telephone', 'email')
+        }),
+        ('Dates système', {
+            'fields': ('created_at', 'updated_at')
+        }),
+    )
+
+
 @admin.register(TypeContrat)
 class TypeContratAdmin(admin.ModelAdmin):
     list_display = ('libelle', 'code', 'est_principal', 'compte_id', 'created_at')
@@ -238,6 +326,7 @@ class ContratAdmin(admin.ModelAdmin):
         'nom_complet',
         'type_contrat',
         'statut',
+        'agence',
         'regle_generation',
         'config_paiement',
         'montant_total',
@@ -251,6 +340,7 @@ class ContratAdmin(admin.ModelAdmin):
     )
     list_select_related = (
         'type_contrat',
+        'agence',
         'regle_generation',
         'regle_penalite',
         'config_paiement',
@@ -262,11 +352,20 @@ class ContratAdmin(admin.ModelAdmin):
         'frequence',
         'type_contrat',
         'compte_id',
+        'agence',
         'regle_generation',
         'config_paiement',
         'regle_penalite',
     )
-    search_fields = ('reference', 'nom_complet', 'immatriculation', 'vin', 'chauffeur__email')
+    search_fields = (
+        'reference',
+        'nom_complet',
+        'immatriculation',
+        'vin',
+        'chauffeur__email',
+        'agence__code',
+        'agence__nom',
+    )
     date_hierarchy = 'created_at'
 
     # 🚀 raw_id_fields : Indispensable pour ne pas faire crasher la page s'il y a 10 000 chauffeurs
@@ -274,6 +373,7 @@ class ContratAdmin(admin.ModelAdmin):
         'chauffeur',
         'enregistre_par',
         'parent',
+        'agence',
         'regle_generation',
         'config_paiement',
         'regle_penalite',
@@ -282,6 +382,34 @@ class ContratAdmin(admin.ModelAdmin):
     # On bloque la modification manuelle des champs générés/calculés
     readonly_fields = ('reference', 'nom_complet_search', 'created_at', 'updated_at')
     ordering = ('-created_at',)
+
+    def get_readonly_fields(self, request, obj=None):
+        champs = list(super().get_readonly_fields(request, obj))
+        if obj is not None and obj.parent_id is not None:
+            champs.append('config_paiement')
+        return tuple(champs)
+
+    def save_model(self, request, obj, form, change):
+        ancienne_agence_id = None
+        if change and obj.pk:
+            ancienne_agence_id = (
+                Contrat.objects
+                .filter(pk=obj.pk)
+                .values_list('agence_id', flat=True)
+                .first()
+            )
+
+        super().save_model(request, obj, form, change)
+
+        if (
+            change
+            and obj.parent_id is None
+            and ancienne_agence_id != obj.agence_id
+        ):
+            obj.sous_contrats.update(
+                agence_id=obj.agence_id,
+                updated_at=timezone.now(),
+            )
 
     def id_reference(self, obj):
         """Colonne combinée : ID en gras, référence en dessous en plus discret."""
@@ -292,7 +420,10 @@ class ContratAdmin(admin.ModelAdmin):
 
     fieldsets = (
         ('Informations Générales', {
-            'fields': ('compte_id', 'reference', 'type_contrat', 'parent', 'statut')
+            'fields': (
+                'compte_id', 'agence', 'reference', 'type_contrat',
+                'parent', 'statut',
+            )
         }),
         ('Acteurs', {
             'fields': ('chauffeur', 'nom_complet', 'nom_complet_search', 'enregistre_par')
@@ -329,6 +460,19 @@ class ContratAdmin(admin.ModelAdmin):
             )
             return None
 
+        contrats_non_actifs = queryset.exclude(
+            statut__in=Contrat.STATUTS_ASSIGNABLES_REGLE_GENERATION,
+        ).count()
+        if contrats_non_actifs:
+            self.message_user(
+                request,
+                "L'attribution d'une règle de génération est réservée aux "
+                f"contrats actifs. La sélection contient "
+                f"{contrats_non_actifs} contrat(s) non actif(s).",
+                level=messages.ERROR,
+            )
+            return None
+
         compte_id = compte_ids[0]
 
         if 'appliquer' in request.POST:
@@ -338,7 +482,9 @@ class ContratAdmin(admin.ModelAdmin):
             )
             if form.is_valid():
                 regle = form.cleaned_data['regle_generation']
-                contrats_modifies = queryset.update(
+                contrats_modifies = queryset.exclude(
+                    regle_generation_id=regle.id,
+                ).update(
                     regle_generation=regle,
                     updated_at=timezone.now(),
                 )
@@ -376,7 +522,7 @@ class ContratAdmin(admin.ModelAdmin):
 
     @admin.action(
         description=(
-            "Attribuer une configuration de paiement aux contrats sélectionnés"
+            "Attribuer une configuration de paiement aux contrats principaux sélectionnés"
         )
     )
     def assigner_config_paiement(self, request, queryset):
@@ -396,6 +542,19 @@ class ContratAdmin(admin.ModelAdmin):
             )
             return None
 
+        sous_contrats_selectionnes = queryset.filter(
+            parent__isnull=False,
+        ).count()
+        if sous_contrats_selectionnes:
+            self.message_user(
+                request,
+                "La configuration de paiement se gère uniquement depuis "
+                "les contrats principaux. Retirez les sous-contrats de la "
+                "sélection.",
+                level=messages.ERROR,
+            )
+            return None
+
         compte_id = compte_ids[0]
         if 'appliquer_config_paiement' in request.POST:
             form = AssignerConfigPaiementContratsForm(
@@ -404,10 +563,19 @@ class ContratAdmin(admin.ModelAdmin):
             )
             if form.is_valid():
                 config = form.cleaned_data['config_paiement']
-                contrats_modifies = queryset.update(
-                    config_paiement=config,
-                    updated_at=timezone.now(),
-                )
+                parent_ids = list(queryset.values_list('pk', flat=True))
+                maintenant = timezone.now()
+                with transaction.atomic():
+                    contrats_modifies = queryset.update(
+                        config_paiement=config,
+                        updated_at=maintenant,
+                    )
+                    sous_contrats_modifies = Contrat.objects.filter(
+                        parent_id__in=parent_ids,
+                    ).update(
+                        config_paiement=config,
+                        updated_at=maintenant,
+                    )
                 destination = (
                     f"la configuration « {config.nom} »"
                     if config
@@ -415,8 +583,9 @@ class ContratAdmin(admin.ModelAdmin):
                 )
                 self.message_user(
                     request,
-                    f"{contrats_modifies} contrat(s) utiliseront désormais "
-                    f"{destination}.",
+                    f"{contrats_modifies} contrat(s) principal(aux) et "
+                    f"{sous_contrats_modifies} sous-contrat(s) utiliseront "
+                    f"désormais {destination}.",
                     level=messages.SUCCESS,
                 )
                 return None
@@ -451,25 +620,34 @@ class TransactionAdmin(admin.ModelAdmin):
         'reference',
         'montant_total',
         'statut',
+        'agence',
         'config_paiement',
         'telephone',
         'date_validation',
         'created_at',
         'compte_id',
     )
-    list_select_related = ('config_paiement', 'utilisateur')
+    list_select_related = ('agence', 'config_paiement', 'utilisateur')
     list_filter = (
         ('created_at', DateRangeAvecHierFilter),
         ('date_validation', DateRangeAvecHierFilter),
-        'statut', 'compte_id',
+        'statut', 'compte_id', 'agence',
     )
-    search_fields = ('reference', 'gateway_reference', 'telephone', 'utilisateur__email')
+    search_fields = (
+        'reference',
+        'gateway_reference',
+        'telephone',
+        'utilisateur__email',
+        'agence__code',
+        'agence__nom',
+    )
     raw_id_fields = ('utilisateur',)
 
     # Personne ne doit pouvoir modifier un payload d'audit ou une date de validation de passerelle
     readonly_fields = (
         'reference',
         'gateway_reference',
+        'agence',
         'config_paiement',
         'webhook_payload',
         'date_validation',
@@ -481,18 +659,39 @@ class TransactionAdmin(admin.ModelAdmin):
 
 @admin.register(Lease)
 class LeaseAdmin(admin.ModelAdmin):
-    list_display = ('contrat', 'date_echeance', 'created_at', 'montant_attendu', 'montant_paye', 'statut', 'id_compte')
+    list_display = (
+        'contrat',
+        'agence',
+        'date_echeance',
+        'created_at',
+        'montant_attendu',
+        'montant_paye',
+        'statut',
+        'id_compte',
+    )
     list_filter = (
         ('created_at', DateRangeAvecHierFilter),
         ('date_echeance', DateRangeAvecHierFilter),
         # Traversée de relation : Lease -> contrat -> type_contrat
-        'statut', 'contrat__type_contrat', 'compte_id',
+        'statut', 'contrat__type_contrat', 'compte_id', 'agence',
     )
     # Évite le N+1 : la colonne 'contrat' appelle le __str__ du contrat sur chaque ligne
-    list_select_related = ('contrat',)
-    search_fields = ('contrat__reference', 'nom_complet', 'nom_complet_search')
+    list_select_related = ('contrat', 'agence')
+    search_fields = (
+        'contrat__reference',
+        'nom_complet',
+        'nom_complet_search',
+        'agence__code',
+        'agence__nom',
+    )
     raw_id_fields = ('contrat',)
-    readonly_fields = ('nom_complet', 'nom_complet_search', 'created_at', 'updated_at')
+    readonly_fields = (
+        'agence',
+        'nom_complet',
+        'nom_complet_search',
+        'created_at',
+        'updated_at',
+    )
     ordering = ('-date_echeance',)
 
     def id_compte(self, obj):
@@ -552,18 +751,33 @@ class LeaseAdmin(admin.ModelAdmin):
 
 @admin.register(Paiement)
 class PaiementAdmin(admin.ModelAdmin):
-    list_display = ('contrat', 'lease', 'enregistre_par','nom_complet', 'session', 'methode', 'statut', 'date_paiement',
-                    'created_at')
+    list_display = (
+        'contrat', 'lease', 'agence', 'enregistre_par', 'nom_complet',
+        'session', 'methode', 'statut', 'date_paiement', 'created_at',
+    )
     # Évite le N+1 queries : chaque colonne ci-dessus appelle le __str__ d'une FK différente
-    list_select_related = ('contrat', 'lease', 'enregistre_par', 'session')
+    list_select_related = (
+        'contrat', 'lease', 'agence', 'enregistre_par', 'session',
+    )
     list_filter = (
         ('created_at', DateRangeAvecHierFilter),
         ('date_paiement', DateRangeAvecHierFilter),
-        'statut', 'methode', 'est_annule', 'compte_id',
+        'statut', 'methode', 'est_annule', 'compte_id', 'agence',
     )
-    search_fields = ('nom_complet', 'session__reference')
+    search_fields = (
+        'nom_complet',
+        'session__reference',
+        'agence__code',
+        'agence__nom',
+    )
     raw_id_fields = ('contrat', 'lease', 'enregistre_par', 'session')
-    readonly_fields = ('nom_complet', 'nom_complet_search', 'created_at', 'updated_at')
+    readonly_fields = (
+        'agence',
+        'nom_complet',
+        'nom_complet_search',
+        'created_at',
+        'updated_at',
+    )
     ordering = ('-date_paiement',)
 
 
@@ -623,11 +837,13 @@ class RegleGenerationLeaseAdmin(admin.ModelAdmin):
         'cron_expression',
         'debut',
         'actif',
+        'defaut',
         'nombre_contrats',
         'created_at',
     )
     list_filter = (
         'actif',
+        'defaut',
         'frequence',
         'compte_id',
         ('debut', DateRangeAvecHierFilter),
@@ -647,7 +863,9 @@ class RegleGenerationLeaseAdmin(admin.ModelAdmin):
 
     fieldsets = (
         ('Identification', {
-            'fields': ('compte_id', 'nom', 'nom_search', 'actif')
+            'fields': (
+                'compte_id', 'nom', 'nom_search', 'actif', 'defaut',
+            )
         }),
         ('Planification', {
             'fields': ('frequence', 'cron_expression', 'debut')
@@ -674,21 +892,40 @@ class RegleGenerationLeaseAdmin(admin.ModelAdmin):
 
 @admin.register(Penalite)
 class PenaliteAdmin(admin.ModelAdmin):
-    list_display = ('nom_complet', 'montant', 'statut', 'date_application', 'lease', 'compte_id')
-    list_filter = ('statut', 'compte_id', 'date_application')
+    list_display = (
+        'nom_complet', 'montant', 'statut', 'date_application',
+        'lease', 'agence', 'compte_id',
+    )
+    list_filter = ('statut', 'compte_id', 'agence', 'date_application')
+    list_select_related = ('lease', 'agence')
 
     # On permet la recherche sur le nom, le motif et la référence du contrat lié au lease
-    search_fields = ('nom_complet', 'nom_complet_search', 'motif', 'lease__contrat__reference')
+    search_fields = (
+        'nom_complet',
+        'nom_complet_search',
+        'motif',
+        'lease__contrat__reference',
+        'agence__code',
+        'agence__nom',
+    )
 
     # raw_id_fields indispensable car il peut y avoir des milliers d'échéances
     raw_id_fields = ('lease',)
 
-    readonly_fields = ('nom_complet_search', 'created_at', 'updated_at')
+    readonly_fields = (
+        'agence',
+        'nom_complet_search',
+        'created_at',
+        'updated_at',
+    )
     ordering = ('-date_application',)
 
     fieldsets = (
         ('Liaison', {
-            'fields': ('compte_id', 'lease', 'nom_complet', 'nom_complet_search')
+            'fields': (
+                'compte_id', 'agence', 'lease', 'nom_complet',
+                'nom_complet_search',
+            )
         }),
         ('Détails de la Sanction', {
             'fields': ('montant', 'statut', 'motif', 'date_application')

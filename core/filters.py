@@ -7,10 +7,16 @@ from recouvrement.models import Lease, Contrat, Paiement, ReglePenalite, Penalit
 class CharInFilter(django_filters.BaseInFilter, django_filters.CharFilter):
     pass
 
+class NumberInFilter(filters.BaseInFilter, filters.NumberFilter):
+    """Permet de filtrer sur une liste d'IDs (ex: ?agence_id__in=1,2,3)"""
+    pass
 
 class LeaseFilter(filters.FilterSet):
     # Filtre sur le statut (Multiple)
     statut__in = CharInFilter(field_name='statut', lookup_expr='in')
+
+    agence_id = filters.NumberFilter(field_name="agence_id")
+    agence_id__in = NumberInFilter(field_name='agence_id', lookup_expr='in')
 
     # ==========================================
     # FILTRES SUR LA DATE D'ÉCHÉANCE (DateField)
@@ -38,6 +44,9 @@ class ContratFilter(filters.FilterSet):
     # ==========================================
     statut__in = CharInFilter(field_name='statut', lookup_expr='in')
     frequence__in = CharInFilter(field_name='frequence', lookup_expr='in')
+
+    agence_id = filters.NumberFilter(field_name="agence_id")
+    agence_id__in = NumberInFilter(field_name='agence_id', lookup_expr='in')
 
     # ==========================================
     # 2. RANGES DE DATES (_start et _end)
@@ -89,6 +98,9 @@ class PaiementFilter(filters.FilterSet):
     statut__in = CharInFilter(field_name='statut', lookup_expr='in')
     methode__in = CharInFilter(field_name='methode', lookup_expr='in')
 
+    agence_id = filters.NumberFilter(field_name="agence_id")
+    agence_id__in = NumberInFilter(field_name='agence_id', lookup_expr='in')
+
     # ==========================================
     # 2. RANGES DE DATES (_start et _end)
     # ==========================================
@@ -124,6 +136,37 @@ class PaiementFilter(filters.FilterSet):
             'methode',
             'est_annule',
         ]
+
+
+class SessionPaiementFilter(filters.FilterSet):
+    # ==========================================
+    # 1. FILTRES MULTIPLES (IN) ET RECHERCHE PARTIELLE
+    # ==========================================
+    statut__in = CharInFilter(field_name='statut', lookup_expr='in')
+    reference__icontains = filters.CharFilter(field_name='reference', lookup_expr='icontains')
+    telephone__icontains = filters.CharFilter(field_name='telephone', lookup_expr='icontains')
+    montant_total_min = filters.NumberFilter(field_name="montant_total", lookup_expr='gte')
+    montant_total_max = filters.NumberFilter(field_name="montant_total", lookup_expr='lte')
+
+    agence_id = filters.NumberFilter(field_name="agence_id")
+    agence_id__in = NumberInFilter(field_name='agence_id', lookup_expr='in')
+
+
+    date_validation_start = filters.DateFilter(field_name="date_validation__date", lookup_expr='gte')
+    date_validation_end = filters.DateFilter(field_name="date_validation__date", lookup_expr='lte')
+    date_validation = filters.DateFilter(field_name="date_validation__date", lookup_expr='exact')
+
+
+
+    class Meta:
+        model = SessionPaiement
+        fields = [
+            'statut',
+            'reference',
+            'gateway_reference',
+            'telephone',
+        ]
+
 
 
 class ReglePenaliteFilter(filters.FilterSet):
@@ -184,31 +227,4 @@ class PenaliteFilter(filters.FilterSet):
         model = Penalite
         fields = [
             'statut',
-        ]
-
-
-class SessionPaiementFilter(filters.FilterSet):
-    # ==========================================
-    # 1. FILTRES MULTIPLES (IN) ET RECHERCHE PARTIELLE
-    # ==========================================
-    statut__in = CharInFilter(field_name='statut', lookup_expr='in')
-    reference__icontains = filters.CharFilter(field_name='reference', lookup_expr='icontains')
-    telephone__icontains = filters.CharFilter(field_name='telephone', lookup_expr='icontains')
-    montant_total_min = filters.NumberFilter(field_name="montant_total", lookup_expr='gte')
-    montant_total_max = filters.NumberFilter(field_name="montant_total", lookup_expr='lte')
-
-
-    date_validation_start = filters.DateFilter(field_name="date_validation__date", lookup_expr='gte')
-    date_validation_end = filters.DateFilter(field_name="date_validation__date", lookup_expr='lte')
-    date_validation = filters.DateFilter(field_name="date_validation__date", lookup_expr='exact')
-
-
-
-    class Meta:
-        model = SessionPaiement
-        fields = [
-            'statut',
-            'reference',
-            'gateway_reference',
-            'telephone',
         ]

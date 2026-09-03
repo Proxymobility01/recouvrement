@@ -6,10 +6,12 @@ import logging
 from collections import defaultdict
 from datetime import timedelta
 from decimal import Decimal
+from django_q.models import Schedule, Task
 from django_q.tasks import async_task
 from django.utils.dateparse import parse_datetime
 from django.db import transaction, DatabaseError, IntegrityError
 from django.db.models import Q, Prefetch
+from django.db.models.deletion import ProtectedError
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import filters, status
@@ -21,21 +23,84 @@ from rest_framework.views import APIView
 from core.filters import LeaseFilter, ContratFilter, PaiementFilter, PenaliteFilter, ReglePenaliteFilter, \
     SessionPaiementFilter
 from core.pagination import StandardResultsSetPagination
-from core.permissions import StrictDjangoModelPermissions
+from core.permissions import (
+    CanAssignRuleToContracts,
+    CanExecuteLeaseGenerationRule,
+    StrictDjangoModelPermissions,
+)
 from core.utils import format_phone_cm
 from core.api.v1.views import TenantModelViewSet
 from core.exceptions import CustomAPIException
 from core.errors import ErrorCodes
-from .serializers import ContratSerializer, LeaseSerializer, InitiationPaiementSerializer, PaiementSerializer, \
+from .serializers import AgenceSerializer, ContratSerializer, LeaseSerializer, InitiationPaiementSerializer, PaiementSerializer, \
     CalendrierSerializer, TypeContratSerializer, SousContratSerializer, ParametreSerializer, ReglePenaliteSerializer, \
     PenaliteSerializer, SessionPaiementSerializer, AssignerRegleSerializer, AnnulerLeasesSerializer, \
     RegleGenerationLeaseSerializer
-from ...models import Contrat, Paiement, Lease, SessionPaiement, TypeContrat, Parametre, ReglePenalite, Penalite, \
+from ...models import Agence, Contrat, Paiement, Lease, SessionPaiement, TypeContrat, Parametre, ReglePenalite, Penalite, \
     RegleGenerationLease
 from ...services import PaymentService, annuler_leases_et_prolonger, AnnulationLeaseError
 from core.tasks import _schedule_next_verification
 
 logger = logging.getLogger(__name__)
+
+
+class AgenceViewSet(TenantModelViewSet):
+    """Gestion multi-tenant des agences opérationnelles."""
+
+    queryset = Agence.objects.all()
+    serializer_class = AgenceSerializer
+    permission_classes = [IsAuthenticated, StrictDjangoModelPermissions]
+    pagination_class = StandardResultsSetPagination
+    filter_backends = [
+        DjangoFilterBackend,
+        filters.SearchFilter,
+        filters.OrderingFilter,
+    ]
+    filterset_fields = ['actif']
+    search_fields = ['nom', 'code', 'adresse', 'telephone', 'email']
+    ordering_fields = ['nom', 'code', 'actif', 'created_at']
+    ordering = ['nom']
+
+    def perform_create(self, serializer):
+        try:
+            super().perform_create(serializer)
+        except IntegrityError as exc:
+            if 'unique_agence_code_par_compte' in str(exc):
+                raise CustomAPIException(
+                    resp_code=ErrorCodes.BAD_REQUEST,
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    dev_message=(
+                        "Ce code d'agence existe déjà pour ce compte."
+                    ),
+                ) from exc
+            raise
+
+    def perform_update(self, serializer):
+        try:
+            super().perform_update(serializer)
+        except IntegrityError as exc:
+            if 'unique_agence_code_par_compte' in str(exc):
+                raise CustomAPIException(
+                    resp_code=ErrorCodes.BAD_REQUEST,
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    dev_message=(
+                        "Ce code d'agence existe déjà pour ce compte."
+                    ),
+                ) from exc
+            raise
+
+    def perform_destroy(self, instance):
+        try:
+            super().perform_destroy(instance)
+        except ProtectedError as exc:
+            raise CustomAPIException(
+                resp_code=ErrorCodes.FORBIDDEN,
+                status_code=status.HTTP_403_FORBIDDEN,
+                dev_message=(
+                    "Suppression impossible : cette agence possède déjà "
+                    "un historique. Désactivez-la plutôt avec actif=false."
+                ),
+            ) from exc
 
 
 class ContratViewSet(TenantModelViewSet):
@@ -45,11 +110,11 @@ class ContratViewSet(TenantModelViewSet):
     pagination_class = StandardResultsSetPagination
     filter_backends = [filters.SearchFilter, filters.OrderingFilter, DjangoFilterBackend]
     filterset_class = ContratFilter
-    search_fields = ['reference', 'vin', 'immatriculation', 'chauffeur__nom_complet','enregistre_par__nom_complet']
+    search_fields = ['reference', 'vin', 'immatriculation', 'chauffeur__nom_complet','enregistre_par__nom_complet','agence__nom_search','agence__code']
     ordering_fields = ['created_at', 'statut',]
     ordering = ['-created_at']
     def get_queryset(self):
-        qs = super().get_queryset().select_related('chauffeur', 'enregistre_par','type_contrat')
+        qs = super().get_queryset().select_related('chauffeur', 'enregistre_par','type_contrat','agence')
         user = self.request.user
 
         if user.is_superuser or user.has_perm('recouvrement.view_all_contrats'):
@@ -209,10 +274,18 @@ class ContratViewSet(TenantModelViewSet):
             )
 
         # 1. Validation des données envoyées par le Front-End
-        serializer = SousContratSerializer(data=request.data)
+        serializer = SousContratSerializer(
+            data=request.data,
+            context={
+                'request': request,
+                'compte_id': parent_contrat.compte_id,
+            },
+        )
         serializer.is_valid(raise_exception=True)
 
         sc_instance_data = serializer.validated_data
+
+        sc_instance_data.pop('agence', None)
 
         # 2. 🧮 LOGIQUE FINANCIÈRE : Extraction et calcul des montants
         sc_total = sc_instance_data.get('montant_total', Decimal('0.00'))
@@ -221,6 +294,7 @@ class ContratViewSet(TenantModelViewSet):
 
         # 3. Héritage automatique de l'ADN du parent et injection des finances
         sc_instance_data['parent'] = parent_contrat
+        sc_instance_data['agence'] = parent_contrat.agence
         sc_instance_data['chauffeur'] = parent_contrat.chauffeur
         sc_instance_data['compte_id'] = parent_contrat.compte_id
         sc_instance_data['nom_complet'] = parent_contrat.nom_complet
@@ -253,7 +327,8 @@ class ContratViewSet(TenantModelViewSet):
             "message": "Sous-contrat ajouté avec succès.",
             "id": sous_contrat.id,
             "reference": sous_contrat.reference,
-            "parent_id": parent_contrat.id
+            "parent_id": parent_contrat.id,
+            "agence_id": sous_contrat.agence_id
         }, status=status.HTTP_201_CREATED)
 
     @action(detail=False, methods=['post'], url_path='annuler-leases')
@@ -308,13 +383,13 @@ class LeaseViewSet(TenantModelViewSet):
     permission_classes = [IsAuthenticated, StrictDjangoModelPermissions]
     filterset_class = LeaseFilter
     filter_backends = [DjangoFilterBackend, filters.OrderingFilter, filters.SearchFilter]
-    search_fields = ['nom_complet_search']
+    search_fields = ['nom_complet_search','agence__nom_search','agence__code']
     ordering_fields = ['date_echeance', 'created_at']
     ordering = ['-date_echeance']
 
     def get_queryset(self):
         # 1. Isolation par compte_id (Automatique via TenantModelViewSet)
-        qs = super().get_queryset().select_related('contrat__type_contrat')
+        qs = super().get_queryset().select_related('contrat__type_contrat','agence')
         user = self.request.user
         # 2. Gestion des droits d'accès
         if user.is_superuser or user.has_perm('recouvrement.view_all_leases'):
@@ -429,32 +504,59 @@ class InitiationPaiementView(GenericAPIView):
         total_montant = sum(ligne['montant'] for ligne in lignes)
 
         leases = [ligne['lease_id'] for ligne in lignes]
-        config_paiement = (
-            PaymentService.resoudre_config_paiement_pour_leases(leases)
-        )
-        comptes_contrats = {
-            lease.contrat.compte_id
-            for lease in leases
-        }
+
+        # ── 2. Vérifications de Sécurité Multi-Tenant & Agence ───────────
+        comptes_contrats = set()
+        agences_trouvees = set()
+        contrats_sans_agence = []
+
+        for lease in leases:
+            comptes_contrats.add(lease.contrat.compte_id)
+            if lease.contrat.agence_id is None:
+                contrats_sans_agence.append(lease.contrat.reference)
+            else:
+                agences_trouvees.add(lease.contrat.agence_id)
+
+        # 🛡️ Vérification des comptes (Isolation Tenant)
         if len(comptes_contrats) != 1:
             raise CustomAPIException(
                 resp_code=ErrorCodes.BAD_REQUEST,
                 status_code=400,
-                dev_message=(
-                    "Les échéances sélectionnées appartiennent à des "
-                    "comptes différents."
-                ),
+                dev_message="Les échéances sélectionnées appartiennent à des comptes différents.",
             )
+
         compte_id_paiement = comptes_contrats.pop()
         if compte_id_paiement != request.user.compte_id:
             raise CustomAPIException(
                 resp_code=ErrorCodes.FORBIDDEN,
                 status_code=403,
+                dev_message="Le compte de l'utilisateur ne correspond pas au compte des contrats sélectionnés.",
+            )
+
+        # 🛡️ Vérification des agences (Cloisonnement des paniers)
+        if contrats_sans_agence:
+            references = ", ".join(sorted(set(contrats_sans_agence)))
+            raise CustomAPIException(
+                resp_code=ErrorCodes.BAD_REQUEST,
+                status_code=400,
                 dev_message=(
-                    "Le compte de l'utilisateur ne correspond pas au compte "
-                    "des contrats sélectionnés."
+                    "Paiement Mobile Money impossible : chaque contrat doit "
+                    "être rattaché à une agence. Contrat(s) concerné(s) : "
+                    f"{references}."
                 ),
             )
+
+        if len(agences_trouvees) > 1:
+            raise CustomAPIException(
+                resp_code=ErrorCodes.BAD_REQUEST,
+                status_code=400,
+                dev_message="Paiement groupé impossible : Veuillez effectuer des paiements séparés par agence."
+            )
+
+        agence_id_choisie = next(iter(agences_trouvees))
+
+        # ── 3. Résolution de la Configuration de Paiement ────────────────
+        config_paiement = PaymentService.resoudre_config_paiement_pour_leases(leases)
 
         reference_session = SessionPaiement.generer_reference_session()
 
@@ -470,6 +572,7 @@ class InitiationPaiementView(GenericAPIView):
                     telephone=phone_number,
                     utilisateur=request.user,
                     compte_id=compte_id_paiement,
+                    agence_id=agence_id_choisie,  # 🏢 Injection de l'agence unique
                     config_paiement=config_paiement,
                     statut=SessionPaiement.STATUT_EN_ATTENTE,
                 )
@@ -480,10 +583,13 @@ class InitiationPaiementView(GenericAPIView):
                         lease=ligne['lease_id'],
                         enregistre_par=request.user,
                         compte_id=ligne['lease_id'].contrat.compte_id,
+                        agence_id=agence_id_choisie,
                         montant=ligne['montant'],
                         methode=Paiement.METHODE_MOBILE_MONEY,
                     )
         except DatabaseError as e:
+            import logging
+            logger = logging.getLogger(__name__)
             logger.exception("Erreur DB lors de la pré-sauvegarde du panier.")
             raise CustomAPIException(
                 resp_code=ErrorCodes.SYSTEM_ERROR,
@@ -494,6 +600,9 @@ class InitiationPaiementView(GenericAPIView):
         # ================================================================
         # 🚀 ÉTAPE 2 : APPEL PASSERELLE
         # ================================================================
+        import logging
+        logger = logging.getLogger(__name__)
+
         try:
             resultat = PaymentService.traiter_paiement_complet(
                 config_paiement_id=config_paiement.id,
@@ -542,8 +651,6 @@ class InitiationPaiementView(GenericAPIView):
         session_locale.save(update_fields=['gateway_reference'])
 
         # ── Collect KO : push USSD non déclenché ─────────────────────────
-        # La session reste EN_ATTENTE : l'utilisateur peut réessayer.
-        # On stocke l'erreur PayGate et on la remonte directement.
         if not resultat['collect_ok']:
             collect_error = resultat.get('collect_error', 'Erreur inconnue de la passerelle.')
             logger.warning(
@@ -736,12 +843,12 @@ class PaiementViewSet(TenantModelViewSet):
     pagination_class = StandardResultsSetPagination
     filter_backends = [DjangoFilterBackend, filters.OrderingFilter, filters.SearchFilter]
     filterset_class = PaiementFilter
-    search_fields = ['reference', 'nom_complet_search', '^session__telephone',]
+    search_fields = ['reference', 'nom_complet_search', '^session__telephone','agence__nom_search','agence__code']
     ordering_fields = ['date_paiement', 'created_at']
     ordering = ['-date_paiement']
 
     def get_queryset(self):
-        qs = super().get_queryset().select_related('enregistre_par', 'contrat', 'lease','session')
+        qs = super().get_queryset().select_related('enregistre_par', 'contrat', 'lease','session','agence')
         user = self.request.user
 
         if user.is_superuser or  user.has_perm('recouvrement.view_all_paiements'):
@@ -903,33 +1010,49 @@ class ReglePenaliteViewSet(TenantModelViewSet):
     # Tri par défaut : les règles les plus récemment créées en premier
     ordering = ['-created_at']
 
-    @action(detail=True, methods=['post'], url_path='assigner-contrats')
+    @action(
+        detail=True,
+        methods=['post'],
+        url_path='assigner-contrats',
+        permission_classes=[IsAuthenticated, CanAssignRuleToContracts],
+    )
     def assigner_contrats(self, request, pk=None):
 
         regle = self.get_object()
 
         serializer = AssignerRegleSerializer(
             data=request.data,
-            context={'request': request}
+            context={
+                'request': request,
+                'compte_id_cible': regle.compte_id,
+            },
         )
         serializer.is_valid(raise_exception=True)
 
         contrat_ids = serializer.validated_data['contrat_ids']
 
-        # ✅ CORRECTION : On capture le nombre de lignes réellement modifiées
-        lignes_modifiees = Contrat.objects.filter(
+        contrats_cibles = Contrat.objects.filter(
             id__in=contrat_ids,
-            compte_id=request.user.compte_id,
-        ).update(regle_penalite=regle)
+            compte_id=regle.compte_id,
+            statut__in=Contrat.STATUTS_ASSIGNABLES_REGLE_GENERATION,
+        ).exclude(regle_penalite_id=regle.id)
+
+        lignes_modifiees = contrats_cibles.update(
+            regle_penalite=regle,
+            updated_at=timezone.now(),
+        )
 
         return Response({
-            # On utilise 'lignes_modifiees' au lieu de 'len(contrat_ids)'
             "message": f"La règle '{regle.nom}' a été appliquée avec succès à {lignes_modifiees} contrat(s)."
         }, status=status.HTTP_200_OK)
 
 
 class PenaliteViewSet(TenantModelViewSet):
-    queryset = Penalite.objects.select_related('lease', 'lease__contrat').all()
+    queryset = Penalite.objects.select_related(
+        'lease',
+        'lease__contrat',
+        'agence',
+    ).all()
     serializer_class = PenaliteSerializer
     http_method_names = ['get', 'head', 'options']
     pagination_class = StandardResultsSetPagination
@@ -954,7 +1077,7 @@ class PenaliteViewSet(TenantModelViewSet):
 
 class SessionPaiementViewSet(TenantModelViewSet):
 
-    queryset = SessionPaiement.objects.select_related('utilisateur').all()
+    queryset = SessionPaiement.objects.select_related('utilisateur','agence').all()
     serializer_class = SessionPaiementSerializer
     pagination_class = StandardResultsSetPagination
     permission_classes = [IsAuthenticated, StrictDjangoModelPermissions]
@@ -966,7 +1089,7 @@ class SessionPaiementViewSet(TenantModelViewSet):
         filters.OrderingFilter,
     ]
     filterset_class = SessionPaiementFilter
-    search_fields = ['reference', 'telephone']
+    search_fields = ['reference', 'telephone','agence__nom']
     ordering_fields = ['created_at', 'montant_total', 'date_validation']
     ordering = ['-created_at']
 
@@ -1006,29 +1129,276 @@ class RegleGenerationLeaseViewSet(TenantModelViewSet):
     # Tri par défaut : les règles les plus récemment créées en premier
     ordering = ['-created_at']
 
-    @action(detail=True, methods=['post'], url_path='assigner-contrats')
+    nom_fonction_generation = 'core.tasks.generer_leases_task'
+
+    @staticmethod
+    def _nom_schedule(regle_id):
+        return f'regle_generation_lease_{regle_id}'
+
+    @staticmethod
+    def _serialiser_execution(tache):
+        if tache is None:
+            return None
+
+        resultat = None
+        if tache.success and isinstance(tache.result, dict):
+            champs_resultat_publics = (
+                'regle_id',
+                'statut',
+                'jusqu_a',
+                'contrats_cibles',
+                'leases_crees',
+                'doublons_ignores',
+                'occurrences_repos_ignorees',
+                'contrats_termines',
+                'erreurs',
+            )
+            resultat = {
+                champ: tache.result[champ]
+                for champ in champs_resultat_publics
+                if champ in tache.result
+            }
+
+        duree_secondes = None
+        if tache.started and tache.stopped:
+            duree_secondes = (
+                tache.stopped - tache.started
+            ).total_seconds()
+
+        return {
+            'task_id': tache.id,
+            'statut': 'SUCCES' if tache.success else 'ECHEC',
+            'succes': tache.success,
+            'demarrage': tache.started,
+            'fin': tache.stopped,
+            'duree_secondes': duree_secondes,
+            'resultat': resultat,
+        }
+
+    def _serialiser_planification(self, regle, schedule, derniere_tache=None):
+        if not regle.actif:
+            etat = 'INACTIVE'
+        elif schedule is None:
+            etat = 'NON_PLANIFIEE'
+        elif schedule.repeats == 0:
+            etat = 'TERMINEE'
+        else:
+            etat = 'PLANIFIEE'
+
+        derniere_execution = self._serialiser_execution(derniere_tache)
+        return {
+            'regle_id': regle.id,
+            'nom': regle.nom,
+            'actif': regle.actif,
+            'frequence': regle.frequence,
+            'frequence_libelle': regle.get_frequence_display(),
+            'debut': regle.debut,
+            'schedule_id': schedule.id if schedule else None,
+            'etat_planification': etat,
+            'next_run': schedule.next_run if schedule else None,
+            'last_run': (
+                derniere_tache.stopped
+                if derniere_tache is not None
+                else None
+            ),
+            'cron_expression': schedule.cron if schedule else None,
+            'repeats': schedule.repeats if schedule else None,
+            'derniere_execution': derniere_execution,
+        }
+
+    @action(detail=False, methods=['get'], url_path='planifications')
+    def planifications(self, request):
+        """Retourne la planification de toutes les règles accessibles."""
+        queryset = self.filter_queryset(self.get_queryset())
+        page = self.paginate_queryset(queryset)
+        regles = list(page if page is not None else queryset)
+
+        noms_schedules = {
+            self._nom_schedule(regle.id): regle
+            for regle in regles
+        }
+        schedules = {}
+        for schedule in (
+            Schedule.objects
+            .filter(
+                name__in=noms_schedules,
+                func=self.nom_fonction_generation,
+            )
+            .order_by('id')
+        ):
+            schedules.setdefault(schedule.name, schedule)
+
+        dernieres_taches = {}
+        for tache in (
+            Task.objects
+            .filter(
+                group__in=noms_schedules,
+                func=self.nom_fonction_generation,
+            )
+            .order_by('-started')
+        ):
+            dernieres_taches.setdefault(tache.group, tache)
+
+        donnees = []
+        for regle in regles:
+            nom_schedule = self._nom_schedule(regle.id)
+            donnees.append(self._serialiser_planification(
+                regle,
+                schedules.get(nom_schedule),
+                dernieres_taches.get(nom_schedule),
+            ))
+
+        if page is not None:
+            return self.get_paginated_response(donnees)
+        return Response(donnees, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['get'], url_path='planification')
+    def planification(self, request, pk=None):
+        """Retourne la planification et les dix dernières exécutions."""
+        regle = self.get_object()
+        nom_schedule = self._nom_schedule(regle.id)
+        schedule = (
+            Schedule.objects
+            .filter(
+                name=nom_schedule,
+                func=self.nom_fonction_generation,
+            )
+            .order_by('id')
+            .first()
+        )
+        taches = list(
+            Task.objects
+            .filter(
+                group=nom_schedule,
+                func=self.nom_fonction_generation,
+            )
+            .order_by('-started')[:10]
+        )
+
+        donnees = self._serialiser_planification(
+            regle,
+            schedule,
+            taches[0] if taches else None,
+        )
+        donnees['historique_executions'] = [
+            self._serialiser_execution(tache)
+            for tache in taches
+        ]
+        return Response(donnees, status=status.HTTP_200_OK)
+
+    @action(
+        detail=True,
+        methods=['post'],
+        url_path='executer-maintenant',
+        permission_classes=[
+            IsAuthenticated,
+            CanExecuteLeaseGenerationRule,
+        ],
+    )
+    def executer_maintenant(self, request, pk=None):
+        """Déclenche la génération sans modifier le prochain passage Q2."""
+        regle = self.get_object()
+        if not regle.actif:
+            raise CustomAPIException(
+                resp_code=ErrorCodes.BAD_REQUEST,
+                status_code=status.HTTP_400_BAD_REQUEST,
+                dev_message=(
+                    "Cette règle est inactive et ne peut pas être exécutée."
+                ),
+            )
+
+        nom_schedule = self._nom_schedule(regle.id)
+        limite = timezone.now()
+        next_run = (
+            Schedule.objects
+            .filter(
+                name=nom_schedule,
+                func=self.nom_fonction_generation,
+            )
+            .order_by('id')
+            .values_list('next_run', flat=True)
+            .first()
+        )
+
+        try:
+            task_id = async_task(
+                self.nom_fonction_generation,
+                regle.id,
+                limite.isoformat(),
+                q_options={'group': nom_schedule},
+            )
+        except Exception as exc:
+            logger.exception(
+                "Impossible d'enfiler l'exécution manuelle de la règle %s.",
+                regle.id,
+            )
+            raise CustomAPIException(
+                resp_code=ErrorCodes.SYSTEM_ERROR,
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                dev_message=(
+                    "La génération n'a pas pu être placée dans la file "
+                    "d'exécution."
+                ),
+            ) from exc
+
+        if not task_id:
+            raise CustomAPIException(
+                resp_code=ErrorCodes.SYSTEM_ERROR,
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                dev_message=(
+                    "Django-Q2 n'a pas retourné d'identifiant de tâche."
+                ),
+            )
+
+        return Response({
+            'message': (
+                "La génération a été placée dans la file d'exécution."
+            ),
+            'regle_id': regle.id,
+            'task_id': task_id,
+            'jusqu_a': limite,
+            'next_run': next_run,
+            'planification_modifiee': False,
+        }, status=status.HTTP_202_ACCEPTED)
+
+    @action(
+        detail=True,
+        methods=['post'],
+        url_path='assigner-contrats',
+        permission_classes=[IsAuthenticated, CanAssignRuleToContracts],
+    )
     def assigner_contrats(self, request, pk=None):
         """
         Applique cette règle de génération à une liste de contrats.
         """
+        # 1. On récupère la règle (la sécurité par compte_id est déjà gérée par TenantModelViewSet)
         regle = self.get_object()
 
-        # Tu peux réutiliser le même Serializer que pour les pénalités
-        # s'il se contente de valider une liste d'IDs (contrat_ids)
+        # 2. Validation du payload (ex: {"contrat_ids": [14, 25, 108]})
         serializer = AssignerRegleSerializer(
             data=request.data,
-            context={'request': request}
+            context={
+                'request': request,
+                'compte_id_cible': regle.compte_id,
+            },
         )
         serializer.is_valid(raise_exception=True)
 
         contrat_ids = serializer.validated_data['contrat_ids']
 
-        # ✅ Mise à jour de masse hyper rapide
-        lignes_modifiees = Contrat.objects.filter(
+        # 3. 🛡️ Isolation Tenant stricte : On cible uniquement les contrats du partenaire
+        contrats_cibles = Contrat.objects.filter(
             id__in=contrat_ids,
-            compte_id=request.user.compte_id,
-        ).update(regle_generation=regle)
+            compte_id=regle.compte_id,
+            statut__in=Contrat.STATUTS_ASSIGNABLES_REGLE_GENERATION,
+        ).exclude(regle_generation_id=regle.id)
 
+        with transaction.atomic():
+            nb_maj = contrats_cibles.update(
+                regle_generation=regle,
+                updated_at=timezone.now(),
+            )
         return Response({
-            "message": f"La règle '{regle.nom}' a été appliquée avec succès à {lignes_modifiees} contrat(s)."
+            "message": f"La règle '{regle.nom}' a été appliquée avec succès.",
+            "contrats_mis_a_jour": nb_maj
         }, status=status.HTTP_200_OK)

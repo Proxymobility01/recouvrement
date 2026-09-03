@@ -2,7 +2,7 @@
 from django.contrib.auth.base_user import AbstractBaseUser
 from django.contrib.auth.models import Permission
 from django.contrib.postgres.indexes import GinIndex
-from django.db import models
+from django.db import models, transaction
 from django.core.exceptions import ValidationError
 from django.db.models import Q
 from accounts.managers import CustomUserManager
@@ -224,6 +224,13 @@ class ConfigPaiement(BaseModel):
             "initier de nouveaux paiements."
         ),
     )
+
+    defaut = models.BooleanField(
+        default=False,
+        verbose_name="Configuration par défaut",
+        help_text="Si coché, cette configuration sera automatiquement assignée aux nouveaux contrats."
+    )
+
     api_key = models.CharField(
         "Clé d'API Passerelle",
         max_length=255,
@@ -252,6 +259,11 @@ class ConfigPaiement(BaseModel):
             models.UniqueConstraint(
                 fields=['compte_id', 'nom'],
                 name='unique_config_paiement_nom_par_compte',
+            ),
+            models.UniqueConstraint(
+                fields=['compte_id'],
+                condition=Q(defaut=True),
+                name='unique_config_paiement_defaut_par_compte',
             ),
         ]
 
@@ -288,8 +300,16 @@ class ConfigPaiement(BaseModel):
                 .values_list('compte_id', flat=True)
                 .first()
             )
-        self.full_clean()
-        super().save(*args, **kwargs)
+
+        with transaction.atomic():
+            if self.defaut:
+                type(self).objects.filter(
+                    compte_id=self.compte_id
+                ).exclude(pk=self.pk).update(defaut=False)
+
+            self.full_clean()
+            super().save(*args, **kwargs)
+
         from django.core.cache import cache
         cache.delete(f"credentials_config_{self.pk}")
         # Nettoyage de l'ancienne clé utilisée avant le support de plusieurs
