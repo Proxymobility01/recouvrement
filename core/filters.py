@@ -168,7 +168,6 @@ class SessionPaiementFilter(filters.FilterSet):
         ]
 
 
-
 class ReglePenaliteFilter(filters.FilterSet):
     # ==========================================
     # 1. FILTRES MULTIPLES (IN)
