@@ -10,35 +10,39 @@ from django_q.models import Schedule, Task
 from django_q.tasks import async_task
 from django.utils.dateparse import parse_datetime
 from django.db import transaction, DatabaseError, IntegrityError
-from django.db.models import Q, Prefetch
+from django.db.models import Exists, OuterRef, Q, Prefetch
 from django.db.models.deletion import ProtectedError
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
-from rest_framework import filters, status
+from rest_framework import filters, mixins, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.generics import GenericAPIView
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from core.filters import LeaseFilter, ContratFilter, PaiementFilter, PenaliteFilter, ReglePenaliteFilter, \
-    SessionPaiementFilter
+    SessionPaiementFilter, PreuvePaiementUSSDFilter, CompteReceptionProprietaireFilter
 from core.pagination import StandardResultsSetPagination
 from core.permissions import (
     CanAssignRuleToContracts,
     CanExecuteLeaseGenerationRule,
+    CanValidateUSSDPayment,
     StrictDjangoModelPermissions,
 )
 from core.utils import format_phone_cm
 from core.api.v1.views import TenantModelViewSet
 from core.exceptions import CustomAPIException
 from core.errors import ErrorCodes
-from .serializers import AgenceSerializer, ContratSerializer, LeaseSerializer, InitiationPaiementSerializer, PaiementSerializer, \
+from .serializers import AgenceSerializer, ContratSerializer, LeaseSerializer, InitiationPaiementSerializer, \
+    InitiationPaiementUSSDSerializer, SoumissionPreuvePaiementUSSDSerializer, PaiementSerializer, \
     CalendrierSerializer, TypeContratSerializer, SousContratSerializer, ParametreSerializer, ReglePenaliteSerializer, \
     PenaliteSerializer, SessionPaiementSerializer, AssignerRegleSerializer, AnnulerLeasesSerializer, \
-    RegleGenerationLeaseSerializer
+    RegleGenerationLeaseSerializer, ProprietaireSerializer, CompteReceptionProprietaireSerializer, \
+    PreuvePaiementUSSDSerializer, RejeterPreuveUSSDSerializer
 from ...models import Agence, Contrat, Paiement, Lease, SessionPaiement, TypeContrat, Parametre, ReglePenalite, Penalite, \
-    RegleGenerationLease
+    RegleGenerationLease, Proprietaire, CompteReceptionProprietaire, PreuvePaiementUSSD
 from ...services import PaymentService, annuler_leases_et_prolonger, AnnulationLeaseError
+from ...services_ussd import PaiementUSSDService
 from core.tasks import _schedule_next_verification
 
 logger = logging.getLogger(__name__)
@@ -105,6 +109,125 @@ class AgenceViewSet(TenantModelViewSet):
             ) from exc
 
 
+class ProprietaireViewSet(TenantModelViewSet):
+    """Gestion multi-tenant des propriétaires (bénéficiaires des collectes)."""
+
+    queryset = Proprietaire.objects.all()
+    serializer_class = ProprietaireSerializer
+    permission_classes = [IsAuthenticated, StrictDjangoModelPermissions]
+    pagination_class = StandardResultsSetPagination
+    filter_backends = [
+        DjangoFilterBackend,
+        filters.SearchFilter,
+        filters.OrderingFilter,
+    ]
+    filterset_fields = ['actif']
+    search_fields = ['nom_complet_search', 'comptes_reception__numero']
+    ordering_fields = ['nom_complet', 'actif', 'created_at']
+    ordering = ['nom_complet']
+
+    def get_queryset(self):
+        return super().get_queryset().prefetch_related('comptes_reception')
+
+    def perform_destroy(self, instance):
+        try:
+            super().perform_destroy(instance)
+        except ProtectedError as exc:
+            raise CustomAPIException(
+                resp_code=ErrorCodes.FORBIDDEN,
+                status_code=status.HTTP_403_FORBIDDEN,
+                dev_message=(
+                    "Suppression impossible : ce propriétaire possède déjà "
+                    "des contrats, des sessions de paiement ou des comptes "
+                    "de réception. Désactivez-le plutôt avec actif=false."
+                ),
+            ) from exc
+
+
+class CompteReceptionProprietaireViewSet(TenantModelViewSet):
+    """Gestion des comptes Mobile Money de réception des propriétaires."""
+
+    queryset = CompteReceptionProprietaire.objects.select_related(
+        'proprietaire'
+    ).all()
+    serializer_class = CompteReceptionProprietaireSerializer
+    permission_classes = [IsAuthenticated, StrictDjangoModelPermissions]
+    pagination_class = StandardResultsSetPagination
+    filter_backends = [
+        DjangoFilterBackend,
+        filters.SearchFilter,
+        filters.OrderingFilter,
+    ]
+    filterset_class = CompteReceptionProprietaireFilter
+    search_fields = [
+        'numero', 'nom_titulaire_search', 'proprietaire__nom_complet_search',
+    ]
+    ordering_fields = ['created_at', 'operateur']
+    ordering = ['-created_at']
+
+    def perform_create(self, serializer):
+        try:
+            super().perform_create(serializer)
+        except IntegrityError as exc:
+            if 'uniq_recept_prop_oper' in str(exc):
+                raise CustomAPIException(
+                    resp_code=ErrorCodes.BAD_REQUEST,
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    dev_message=(
+                        "Ce propriétaire possède déjà un compte de "
+                        "réception pour cet opérateur."
+                    ),
+                ) from exc
+            if 'uniq_recept_num_oper_compte' in str(exc):
+                raise CustomAPIException(
+                    resp_code=ErrorCodes.BAD_REQUEST,
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    dev_message=(
+                        "Ce numéro est déjà utilisé pour cet opérateur au "
+                        "sein de votre entreprise."
+                    ),
+                ) from exc
+            raise
+
+    def perform_update(self, serializer):
+        try:
+            super().perform_update(serializer)
+        except IntegrityError as exc:
+            if 'uniq_recept_prop_oper' in str(exc):
+                raise CustomAPIException(
+                    resp_code=ErrorCodes.BAD_REQUEST,
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    dev_message=(
+                        "Ce propriétaire possède déjà un compte de "
+                        "réception pour cet opérateur."
+                    ),
+                ) from exc
+            if 'uniq_recept_num_oper_compte' in str(exc):
+                raise CustomAPIException(
+                    resp_code=ErrorCodes.BAD_REQUEST,
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    dev_message=(
+                        "Ce numéro est déjà utilisé pour cet opérateur au "
+                        "sein de votre entreprise."
+                    ),
+                ) from exc
+            raise
+
+    def perform_destroy(self, instance):
+        try:
+            super().perform_destroy(instance)
+        except ProtectedError as exc:
+            raise CustomAPIException(
+                resp_code=ErrorCodes.FORBIDDEN,
+                status_code=status.HTTP_403_FORBIDDEN,
+                dev_message=(
+                    "Suppression impossible : ce compte de réception a "
+                    "déjà servi à des sessions de paiement. Désactivez-le "
+                    "plutôt avec actif=false."
+                ),
+            ) from exc
+
+
 class ContratViewSet(TenantModelViewSet):
     queryset = Contrat.objects.all()
     serializer_class = ContratSerializer
@@ -116,11 +239,16 @@ class ContratViewSet(TenantModelViewSet):
         'reference', 'vin', 'immatriculation', 'chauffeur__nom_complet',
         'enregistre_par__nom_complet', 'agence__nom_search',
         'agence__zone_search', 'agence__code',
+        'proprietaire__nom_complet_search',
+        'proprietaire__comptes_reception__numero',
     ]
     ordering_fields = ['created_at', 'statut',]
     ordering = ['-created_at']
     def get_queryset(self):
-        qs = super().get_queryset().select_related('chauffeur', 'enregistre_par','type_contrat','agence')
+        qs = super().get_queryset().select_related(
+            'chauffeur', 'enregistre_par', 'type_contrat', 'agence',
+            'proprietaire',
+        )
         user = self.request.user
 
         if user.is_superuser or user.has_perm('recouvrement.view_all_contrats'):
@@ -398,7 +526,23 @@ class LeaseViewSet(TenantModelViewSet):
 
     def get_queryset(self):
         # 1. Isolation par compte_id (Automatique via TenantModelViewSet)
-        qs = super().get_queryset().select_related('contrat__type_contrat','agence')
+        preuve_en_verification = Paiement.objects.filter(
+            lease_id=OuterRef('pk'),
+            methode=Paiement.METHODE_USSD_ASSISTE,
+            statut=Paiement.STATUT_EN_ATTENTE,
+            est_annule=False,
+            session__canal=SessionPaiement.CANAL_USSD_ASSISTE,
+            session__statut=SessionPaiement.STATUT_EN_VERIFICATION,
+        )
+        qs = (
+            super().get_queryset()
+            .select_related('contrat__type_contrat', 'agence')
+            .annotate(
+                paiement_ussd_en_verification=Exists(
+                    preuve_en_verification
+                )
+            )
+        )
         user = self.request.user
         # 2. Gestion des droits d'accès
         if user.is_superuser or user.has_perm('recouvrement.view_all_leases'):
@@ -697,6 +841,174 @@ class InitiationPaiementView(GenericAPIView):
             "gateway_reference": session_locale.gateway_reference,
             "montant_total": total_montant,
         }, status=status.HTTP_201_CREATED)
+
+
+class InitiationPaiementUSSDView(GenericAPIView):
+    """Prépare un transfert direct vers le compte du propriétaire."""
+
+    permission_classes = [IsAuthenticated, StrictDjangoModelPermissions]
+    queryset = SessionPaiement.objects.all()
+    serializer_class = InitiationPaiementUSSDSerializer
+
+    def post(self, request, *args, **kwargs):
+        serializer = self.get_serializer(
+            data=request.data,
+            context={'request': request},
+        )
+        serializer.is_valid(raise_exception=True)
+        donnees = serializer.validated_data
+
+        session = PaiementUSSDService.initier_session(
+            utilisateur=request.user,
+            lignes=donnees['lignes'],
+            operateur=donnees['operateur'],
+            telephone=donnees.get('phone_number', ''),
+        )
+
+        return Response({
+            'success': True,
+            'pending': True,
+            'message': (
+                "Session USSD créée. Effectuez le transfert puis envoyez "
+                "la preuve reçue par SMS."
+            ),
+            'reference_interne': session.reference,
+            'montant_total': session.montant_total,
+            'operateur': session.operateur,
+            'destinataire': {
+                'proprietaire_id': session.proprietaire_id,
+                'nom_proprietaire': session.proprietaire.nom_complet,
+                'numero': session.numero_destinataire,
+                'nom_titulaire': session.nom_destinataire,
+            },
+        }, status=status.HTTP_201_CREATED)
+
+
+class SoumissionPreuvePaiementUSSDView(GenericAPIView):
+    """Reçoit la preuve SMS sans encore comptabiliser le paiement."""
+
+    permission_classes = [IsAuthenticated, StrictDjangoModelPermissions]
+    queryset = SessionPaiement.objects.all()
+    serializer_class = SoumissionPreuvePaiementUSSDSerializer
+
+    def post(self, request, *args, **kwargs):
+        serializer = self.get_serializer(
+            data=request.data,
+            context={'request': request},
+        )
+        serializer.is_valid(raise_exception=True)
+        donnees = serializer.validated_data
+
+        preuve = PaiementUSSDService.soumettre_preuve(
+            session=donnees['session'],
+            donnees=donnees,
+            payload_capture=request.data,
+        )
+
+        return Response({
+            'success': True,
+            'pending': True,
+            'message': "La preuve de paiement est en cours de vérification.",
+            'session_reference': preuve.session.reference,
+            'preuve_id': preuve.id,
+            'statut': preuve.statut,
+        }, status=status.HTTP_201_CREATED)
+
+
+class PreuvePaiementUSSDViewSet(
+    mixins.ListModelMixin,
+    mixins.RetrieveModelMixin,
+    viewsets.GenericViewSet,
+):
+    """
+    Consultation des preuves de paiement USSD et vérification (valider/rejeter).
+
+    Lecture seule sur les routes standards : la création se fait via
+    /soumettre-preuve-paiement-ussd/, et seules les actions dédiées
+    permettent de faire transitionner le statut d'une preuve.
+    """
+
+    queryset = PreuvePaiementUSSD.objects.select_related(
+        'session', 'session__proprietaire', 'verifie_par',
+    ).all()
+    serializer_class = PreuvePaiementUSSDSerializer
+    permission_classes = [IsAuthenticated, StrictDjangoModelPermissions]
+    pagination_class = StandardResultsSetPagination
+    filter_backends = [
+        DjangoFilterBackend,
+        filters.SearchFilter,
+        filters.OrderingFilter,
+    ]
+    filterset_class = PreuvePaiementUSSDFilter
+    search_fields = [
+        'reference_operateur', 'numero_expediteur', 'numero_destinataire',
+        'nom_expediteur', 'nom_destinataire', 'session__reference',
+    ]
+    ordering_fields = ['created_at', 'verifie_le', 'montant_transfere']
+    ordering = ['-created_at']
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        user = self.request.user
+        if user.is_superuser:
+            return qs
+        return qs.filter(compte_id=user.compte_id)
+
+    @action(
+        detail=True,
+        methods=['post'],
+        url_path='valider',
+        permission_classes=[IsAuthenticated, CanValidateUSSDPayment],
+    )
+    def valider(self, request, pk=None):
+        preuve_cible = self.get_object()
+
+        preuve, modifiee = PaiementUSSDService.valider_preuve(
+            preuve_id=preuve_cible.pk,
+            agent=request.user,
+        )
+
+        message = (
+            "Preuve validée avec succès. La ventilation des paiements a "
+            "été déclenchée."
+            if modifiee
+            else "Cette preuve était déjà validée."
+        )
+        return Response({
+            "message": message,
+            "modifiee": modifiee,
+            "preuve": PreuvePaiementUSSDSerializer(preuve).data,
+        }, status=status.HTTP_200_OK)
+
+    @action(
+        detail=True,
+        methods=['post'],
+        url_path='rejeter',
+        permission_classes=[IsAuthenticated, CanValidateUSSDPayment],
+    )
+    def rejeter(self, request, pk=None):
+        preuve_cible = self.get_object()
+
+        serializer = RejeterPreuveUSSDSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        preuve, modifiee = PaiementUSSDService.rejeter_preuve(
+            preuve_id=preuve_cible.pk,
+            agent=request.user,
+            motif=serializer.validated_data['motif'],
+        )
+
+        message = (
+            "Preuve rejetée. Les échéances concernées peuvent être payées "
+            "à nouveau."
+            if modifiee
+            else "Cette preuve était déjà rejetée."
+        )
+        return Response({
+            "message": message,
+            "modifiee": modifiee,
+            "preuve": PreuvePaiementUSSDSerializer(preuve).data,
+        }, status=status.HTTP_200_OK)
 
 
 class WebhookView(APIView):
@@ -1092,7 +1404,12 @@ class PenaliteViewSet(TenantModelViewSet):
 
 class SessionPaiementViewSet(TenantModelViewSet):
 
-    queryset = SessionPaiement.objects.select_related('utilisateur','agence').all()
+    queryset = SessionPaiement.objects.select_related(
+        'utilisateur',
+        'agence',
+        'proprietaire',
+        'compte_reception',
+    ).all()
     serializer_class = SessionPaiementSerializer
     pagination_class = StandardResultsSetPagination
     permission_classes = [IsAuthenticated, StrictDjangoModelPermissions]
@@ -1107,6 +1424,8 @@ class SessionPaiementViewSet(TenantModelViewSet):
     search_fields = [
         'reference', 'telephone', 'agence__nom_search',
         'agence__zone_search', 'agence__code',
+        'proprietaire__nom_complet_search',
+        'numero_destinataire',
     ]
     ordering_fields = ['created_at', 'montant_total', 'date_validation']
     ordering = ['-created_at']
@@ -1115,6 +1434,9 @@ class SessionPaiementViewSet(TenantModelViewSet):
         qs = super().get_queryset().select_related(
             'config_paiement',
             'utilisateur',
+            'proprietaire',
+            'compte_reception',
+            'preuve_ussd',
         )
         user = self.request.user
         if user.is_superuser:

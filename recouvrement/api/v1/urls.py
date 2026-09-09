@@ -6,12 +6,16 @@ from recouvrement.api.v1.views import (
     ContratViewSet,
     LeaseViewSet,
     InitiationPaiementView,
+    InitiationPaiementUSSDView,
+    SoumissionPreuvePaiementUSSDView,
     WebhookView,
     PaiementViewSet,
     TypeContratViewSet,
     ParametreViewSet,
     ReglePenaliteViewSet,
-    PenaliteViewSet, SessionPaiementViewSet, RegleGenerationLeaseViewSet
+    PenaliteViewSet, SessionPaiementViewSet, RegleGenerationLeaseViewSet,
+    ProprietaireViewSet, CompteReceptionProprietaireViewSet,
+    PreuvePaiementUSSDViewSet,
 )
 
 
@@ -28,8 +32,29 @@ router.register(r'regles-penalites', ReglePenaliteViewSet, basename='regle-penal
 router.register(r'regles-gereration-leases', RegleGenerationLeaseViewSet, basename='regles-gereration-leases')
 router.register(r'penalites', PenaliteViewSet, basename='penalite')
 router.register(r'transactions', SessionPaiementViewSet, basename='session-paiement')
+router.register(r'proprietaires', ProprietaireViewSet, basename='proprietaire')
+router.register(
+    r'comptes-reception-proprietaires',
+    CompteReceptionProprietaireViewSet,
+    basename='compte-reception-proprietaire',
+)
+router.register(
+    r'preuves-paiement-ussd',
+    PreuvePaiementUSSDViewSet,
+    basename='preuve-paiement-ussd',
+)
 urlpatterns = [
     path('', include(router.urls)),
     path('initier-paiement/', InitiationPaiementView.as_view(), name='initier-paiement'),
+    path(
+        'initier-paiement-ussd/',
+        InitiationPaiementUSSDView.as_view(),
+        name='initier-paiement-ussd',
+    ),
+    path(
+        'soumettre-preuve-paiement-ussd/',
+        SoumissionPreuvePaiementUSSDView.as_view(),
+        name='soumettre-preuve-paiement-ussd',
+    ),
     path('webhook/', WebhookView.as_view(), name='webhook-paiement'),
 ]

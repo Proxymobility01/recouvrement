@@ -8,7 +8,7 @@ from django.db import models, transaction
 from django.utils import timezone
 from django_q.models import Schedule
 from accounts.models import BaseModel, ConfigPaiement, CustomUser
-from core.utils import remove_accents
+from core.utils import format_phone_cm, remove_accents
 
 
 # Create your models here.
@@ -118,6 +118,154 @@ class AgenceScopedModel(BaseModel):
         abstract = True
 
 
+class Proprietaire(BaseModel):
+    """Bénéficiaire des collectes réalisées sur ses contrats."""
+
+    nom_complet = models.CharField(max_length=255)
+    nom_complet_search = models.CharField(
+        max_length=255,
+        blank=True,
+        editable=False,
+    )
+    actif = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = "rc_proprietaire"
+        verbose_name = "Propriétaire"
+        verbose_name_plural = "Propriétaires"
+        indexes = [
+            GinIndex(
+                fields=['nom_complet_search'],
+                name='idx_prop_nom_search_trgm',
+                opclasses=['gin_trgm_ops'],
+            ),
+            models.Index(
+                fields=['compte_id', 'actif'],
+                name='idx_prop_compte_actif',
+            ),
+        ]
+
+    def save(self, *args, **kwargs):
+        if self.pk:
+            ancien_compte_id = (
+                type(self).objects
+                .filter(pk=self.pk)
+                .values_list('compte_id', flat=True)
+                .first()
+            )
+            if (
+                ancien_compte_id is not None
+                and ancien_compte_id != self.compte_id
+            ):
+                raise ValidationError({
+                    'compte_id': (
+                        "Le compte partenaire d'un propriétaire ne peut "
+                        "pas être modifié."
+                    ),
+                })
+
+        self.nom_complet = (self.nom_complet or '').strip()
+        self.nom_complet_search = remove_accents(self.nom_complet)
+
+        update_fields = kwargs.get('update_fields')
+        if update_fields is not None:
+            update_fields = set(update_fields)
+            if 'nom_complet' in update_fields:
+                update_fields.add('nom_complet_search')
+            kwargs['update_fields'] = list(update_fields)
+
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return self.nom_complet
+
+
+class CompteReceptionProprietaire(BaseModel):
+    """Compte Mobile Money sur lequel un propriétaire reçoit ses fonds."""
+
+    OPERATEUR_ORANGE = 'ORANGE'
+    OPERATEUR_MTN = 'MTN'
+    OPERATEUR_CHOICES = [
+        (OPERATEUR_ORANGE, 'Orange Money'),
+        (OPERATEUR_MTN, 'MTN Mobile Money'),
+    ]
+
+    proprietaire = models.ForeignKey(
+        Proprietaire,
+        on_delete=models.PROTECT,
+        related_name='comptes_reception',
+    )
+    operateur = models.CharField(max_length=10, choices=OPERATEUR_CHOICES)
+    numero = models.CharField(max_length=20)
+    nom_titulaire = models.CharField(max_length=255, blank=True)
+    nom_titulaire_search = models.CharField(
+        max_length=255,
+        blank=True,
+        editable=False,
+    )
+    actif = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = "rc_compte_reception_proprietaire"
+        verbose_name = "Compte de réception du propriétaire"
+        verbose_name_plural = "Comptes de réception des propriétaires"
+        constraints = [
+            models.UniqueConstraint(
+                fields=['proprietaire', 'operateur'],
+                name='uniq_recept_prop_oper',
+            ),
+            models.UniqueConstraint(
+                fields=['compte_id', 'operateur', 'numero'],
+                name='uniq_recept_num_oper_compte',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['numero'], name='idx_recept_numero'),
+            models.Index(
+                fields=['compte_id', 'operateur', 'actif'],
+                name='idx_recept_cpte_oper_actif',
+            ),
+            GinIndex(
+                fields=['nom_titulaire_search'],
+                name='idx_recept_tit_search_trgm',
+                opclasses=['gin_trgm_ops'],
+            ),
+        ]
+
+    def save(self, *args, **kwargs):
+        if self.proprietaire_id:
+            if self.compte_id != self.proprietaire.compte_id:
+                raise ValidationError({
+                    'proprietaire': (
+                        "Le compte de réception et le propriétaire doivent "
+                        "appartenir au même compte partenaire."
+                    ),
+                })
+
+            if not self.nom_titulaire:
+                self.nom_titulaire = self.proprietaire.nom_complet
+
+        self.operateur = (self.operateur or '').strip().upper()
+        self.numero = format_phone_cm(self.numero)
+        self.nom_titulaire = (self.nom_titulaire or '').strip()
+        self.nom_titulaire_search = remove_accents(self.nom_titulaire)
+
+        update_fields = kwargs.get('update_fields')
+        if update_fields is not None:
+            update_fields = set(update_fields)
+            if 'proprietaire' in update_fields:
+                update_fields.add('nom_titulaire')
+                update_fields.add('nom_titulaire_search')
+            if 'nom_titulaire' in update_fields:
+                update_fields.add('nom_titulaire_search')
+            kwargs['update_fields'] = list(update_fields)
+
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.get_operateur_display()} - {self.numero}"
+
+
 class TypeContrat(BaseModel):
     """
     Permet de créer des types de contrats à l'infini (GPS, Parapluie, etc.)
@@ -215,6 +363,18 @@ class Contrat(AgenceScopedModel):
         help_text="Si ce contrat est un accessoire, sélectionnez le contrat principal ici."
     )
 
+    proprietaire = models.ForeignKey(
+        Proprietaire,
+        on_delete=models.PROTECT,
+        related_name='contrats',
+        null=True,
+        blank=True,
+        help_text=(
+            "Propriétaire qui reçoit les paiements de ce contrat. Le champ "
+            "reste nullable pour permettre la reprise des contrats existants."
+        ),
+    )
+
     nom_complet = models.CharField(max_length=255)
     nom_complet_search = models.CharField(max_length=255, null=True, blank=True)
     reference = models.CharField(
@@ -297,6 +457,10 @@ class Contrat(AgenceScopedModel):
             models.Index(fields=['immatriculation'], name='idx_contrat_immat'),
             models.Index(fields=['vin'], name='idx_contrat_vin'),
             models.Index(fields=['compte_id', '-created_at'], name='idx_contrat_tenant_date'),
+            models.Index(
+                fields=['compte_id', 'proprietaire'],
+                name='idx_contrat_tenant_prop',
+            ),
         ]
 
 
@@ -342,13 +506,19 @@ class Contrat(AgenceScopedModel):
     def save(self, *args, **kwargs):
         est_creation = self._state.adding
         ancienne_config_paiement_id = None
+        ancien_proprietaire_id = None
         if not est_creation and self.parent_id is None:
-            ancienne_config_paiement_id = (
+            anciennes_valeurs = (
                 type(self).objects
                 .filter(pk=self.pk)
-                .values_list('config_paiement_id', flat=True)
+                .values('config_paiement_id', 'proprietaire_id')
                 .first()
             )
+            if anciennes_valeurs is not None:
+                ancienne_config_paiement_id = anciennes_valeurs[
+                    'config_paiement_id'
+                ]
+                ancien_proprietaire_id = anciennes_valeurs['proprietaire_id']
 
         update_fields = kwargs.get('update_fields')
         if update_fields is not None:
@@ -370,9 +540,9 @@ class Contrat(AgenceScopedModel):
             if update_fields is not None:
                 update_fields.add('regle_generation')
 
-        # Un sous-contrat hérite toujours de l'agence et de la configuration
-        # de paiement de son parent. Ces deux attributs ne sont jamais choisis
-        # indépendamment au niveau du sous-contrat.
+        # Un sous-contrat hérite toujours de l'agence, du propriétaire et de
+        # la configuration de paiement de son parent. Ces attributs ne sont
+        # jamais choisis indépendamment au niveau du sous-contrat.
         if self.parent_id:
             agence_parent_id = self.parent.agence_id
             if self.agence_id != agence_parent_id:
@@ -385,6 +555,12 @@ class Contrat(AgenceScopedModel):
                 self.config_paiement_id = config_parent_id
                 if update_fields is not None:
                     update_fields.add('config_paiement')
+
+            proprietaire_parent_id = self.parent.proprietaire_id
+            if self.proprietaire_id != proprietaire_parent_id:
+                self.proprietaire_id = proprietaire_parent_id
+                if update_fields is not None:
+                    update_fields.add('proprietaire')
         elif (
             est_creation
             and self.config_paiement_id is None
@@ -408,6 +584,35 @@ class Contrat(AgenceScopedModel):
                 'config_paiement': (
                     "La configuration de paiement doit appartenir au même "
                     "compte que le contrat."
+                ),
+            })
+
+        if (
+            self.proprietaire_id is not None
+            and self.proprietaire.compte_id != self.compte_id
+        ):
+            raise ValidationError({
+                'proprietaire': (
+                    "Le propriétaire doit appartenir au même compte que le "
+                    "contrat."
+                ),
+            })
+
+        proprietaire_sauvegarde = (
+            update_fields is None or 'proprietaire' in update_fields
+        )
+        if (
+            not est_creation
+            and self.parent_id is None
+            and proprietaire_sauvegarde
+            and ancien_proprietaire_id != self.proprietaire_id
+            and self.possede_historique_financier()
+        ):
+            raise ValidationError({
+                'proprietaire': (
+                    "Le propriétaire ne peut plus être modifié car ce "
+                    "contrat ou l'un de ses sous-contrats possède déjà un "
+                    "historique financier."
                 ),
             })
 
@@ -447,6 +652,26 @@ class Contrat(AgenceScopedModel):
                     updated_at=timezone.now(),
                 )
 
+            if (
+                not est_creation
+                and self.parent_id is None
+                and proprietaire_sauvegarde
+                and ancien_proprietaire_id != self.proprietaire_id
+            ):
+                self.sous_contrats.update(
+                    proprietaire_id=self.proprietaire_id,
+                    updated_at=timezone.now(),
+                )
+
+    def possede_historique_financier(self):
+        """Inclut le contrat courant et tous ses sous-contrats."""
+        if self.leases.exists() or self.paiements.exists():
+            return True
+
+        return self.sous_contrats.filter(
+            Q(leases__isnull=False) | Q(paiements__isnull=False)
+        ).exists()
+
     @property
     def has_sous_contrat(self):
         """
@@ -461,19 +686,36 @@ class SessionPaiement(AgenceScopedModel):
     Représente un panier de paiement global regroupant plusieurs échéances.
     C'est cette référence qui est envoyée au fournisseur Mobile Money.
     """
+    CANAL_PASSERELLE = 'PASSERELLE'
+    CANAL_USSD_ASSISTE = 'USSD_ASSISTE'
+
+    CANAL_CHOICES = [
+        (CANAL_PASSERELLE, 'Passerelle Mobile Money'),
+        (CANAL_USSD_ASSISTE, 'Paiement USSD assisté'),
+    ]
+
     STATUT_EN_ATTENTE = 'EN_ATTENTE'
+    STATUT_EN_VERIFICATION = 'EN_VERIFICATION'
     STATUT_VALIDE = 'VALIDE'
     STATUT_ECHEC = 'ECHEC'
     STATUT_ANNULE = 'ANNULE'
+    STATUT_REJETE = 'REJETE'
 
     STATUT_CHOICES = [
         (STATUT_EN_ATTENTE, 'En attente'),
+        (STATUT_EN_VERIFICATION, 'En vérification'),
         (STATUT_VALIDE, 'Validé'),
         (STATUT_ECHEC, 'Échec'),
         (STATUT_ANNULE, 'Annulé'),
+        (STATUT_REJETE, 'Rejeté'),
     ]
 
     reference = models.CharField(max_length=100, unique=True,)
+    canal = models.CharField(
+        max_length=20,
+        choices=CANAL_CHOICES,
+        default=CANAL_PASSERELLE,
+    )
     gateway_reference = models.CharField(max_length=255, null=True, blank=True)
     date_validation = models.DateTimeField(null=True, blank=True)
     montant_total = models.DecimalField(max_digits=12, decimal_places=2)
@@ -500,14 +742,45 @@ class SessionPaiement(AgenceScopedModel):
         ),
     )
 
+    proprietaire = models.ForeignKey(
+        Proprietaire,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name='sessions_paiement',
+    )
+    compte_reception = models.ForeignKey(
+        CompteReceptionProprietaire,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name='sessions_paiement',
+    )
+    operateur = models.CharField(
+        max_length=10,
+        choices=CompteReceptionProprietaire.OPERATEUR_CHOICES,
+        null=True,
+        blank=True,
+    )
+    numero_destinataire = models.CharField(
+        max_length=20,
+        null=True,
+        blank=True,
+    )
+    nom_destinataire = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+    )
+
     @classmethod
-    def generer_reference_session(cls) -> str:
+    def generer_reference_session(cls, prefixe='MOB') -> str:
         """Génère une référence de session unique, cryptographiquement sûre."""
         now = timezone.now()
         date_str = now.strftime("%Y%m%d")
         heure_str = now.strftime("%H%M%S")
         random_suffix = secrets.token_hex(3).upper()
-        return f"MOB.{date_str}.{heure_str}.{random_suffix}"
+        return f"{prefixe}.{date_str}.{heure_str}.{random_suffix}"
 
     class Meta:
         db_table = "rc_session_paiement"
@@ -516,6 +789,10 @@ class SessionPaiement(AgenceScopedModel):
         ]
         indexes = [
             models.Index(fields=['compte_id', '-created_at'], name='idx_spaie_tenant_date'),
+            models.Index(
+                fields=['compte_id', 'canal', 'statut'],
+                name='idx_spaie_cpte_canal_stat',
+            ),
             GinIndex(
                 fields=['reference'],
                 name='idx_spaie_ref_trgm',
@@ -533,6 +810,131 @@ class SessionPaiement(AgenceScopedModel):
 
     def __str__(self):
         return f"Session {self.reference} - {self.montant_total} XAF"
+
+
+class PreuvePaiementUSSD(BaseModel):
+    """Preuve capturée sur le téléphone après un transfert USSD."""
+
+    STATUT_EN_VERIFICATION = 'EN_VERIFICATION'
+    STATUT_VALIDEE = 'VALIDEE'
+    STATUT_REJETEE = 'REJETEE'
+
+    STATUT_CHOICES = [
+        (STATUT_EN_VERIFICATION, 'En vérification'),
+        (STATUT_VALIDEE, 'Validée'),
+        (STATUT_REJETEE, 'Rejetée'),
+    ]
+
+    session = models.OneToOneField(
+        SessionPaiement,
+        on_delete=models.PROTECT,
+        related_name='preuve_ussd',
+    )
+    operateur = models.CharField(
+        max_length=10,
+        choices=CompteReceptionProprietaire.OPERATEUR_CHOICES,
+    )
+    reference_operateur = models.CharField(max_length=100)
+    texte_brut = models.TextField()
+    montant_transfere = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        validators=[MinValueValidator(Decimal('0.01'))],
+    )
+    frais_operateur = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal('0.00'),
+        validators=[MinValueValidator(Decimal('0.00'))],
+    )
+    commission = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal('0.00'),
+        validators=[MinValueValidator(Decimal('0.00'))],
+    )
+    nouveau_solde = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        null=True,
+        blank=True,
+    )
+    nom_expediteur = models.CharField(max_length=255, blank=True)
+    numero_expediteur = models.CharField(max_length=20)
+    nom_destinataire = models.CharField(max_length=255, blank=True)
+    numero_destinataire = models.CharField(max_length=20)
+    date_transaction = models.DateTimeField(null=True, blank=True)
+    capture_appareil_le = models.DateTimeField()
+    payload_capture = models.JSONField(default=dict)
+    statut = models.CharField(
+        max_length=20,
+        choices=STATUT_CHOICES,
+        default=STATUT_EN_VERIFICATION,
+    )
+    verifie_par = models.ForeignKey(
+        CustomUser,
+        on_delete=models.PROTECT,
+        related_name='preuves_ussd_verifiees',
+        null=True,
+        blank=True,
+    )
+    verifie_le = models.DateTimeField(null=True, blank=True)
+    motif_rejet = models.TextField(blank=True)
+
+    class Meta:
+        db_table = 'rc_preuve_paiement_ussd'
+        verbose_name = 'Preuve de paiement USSD'
+        verbose_name_plural = 'Preuves de paiement USSD'
+        permissions = [
+            (
+                'can_validate_ussd_payment',
+                'Peut valider ou rejeter une preuve de paiement USSD',
+            ),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['compte_id', 'operateur', 'reference_operateur'],
+                name='uniq_preuve_ref_oper_compte',
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=['compte_id', 'statut', '-created_at'],
+                name='idx_preuve_cpte_stat_date',
+            ),
+            models.Index(
+                fields=['numero_destinataire'],
+                name='idx_preuve_dest_numero',
+            ),
+        ]
+
+    def save(self, *args, **kwargs):
+        self.operateur = (self.operateur or '').strip().upper()
+        self.reference_operateur = (
+            self.reference_operateur or ''
+        ).strip().upper()
+        self.numero_expediteur = format_phone_cm(self.numero_expediteur)
+        self.numero_destinataire = format_phone_cm(self.numero_destinataire)
+        self.nom_expediteur = (self.nom_expediteur or '').strip()
+        self.nom_destinataire = (self.nom_destinataire or '').strip()
+
+        if self.session_id:
+            if self.session.canal != SessionPaiement.CANAL_USSD_ASSISTE:
+                raise ValidationError({
+                    'session': "Cette session n'est pas un paiement USSD assisté.",
+                })
+            if self.session.compte_id != self.compte_id:
+                raise ValidationError({
+                    'session': (
+                        "La preuve et sa session doivent appartenir au même "
+                        "compte partenaire."
+                    ),
+                })
+
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"Preuve {self.reference_operateur} - {self.statut}"
 
 
 class Lease(AgenceScopedModel):
@@ -622,10 +1024,12 @@ class Lease(AgenceScopedModel):
 class Paiement(AgenceScopedModel):
     # --- Constantes de Méthode ---
     METHODE_MOBILE_MONEY = 'MOBILE_MONEY'
+    METHODE_USSD_ASSISTE = 'USSD_ASSISTE'
     METHODE_ESPECES = 'ESPECES'
 
     METHODE_CHOICES = [
         (METHODE_MOBILE_MONEY, 'Mobile Money'),
+        (METHODE_USSD_ASSISTE, 'USSD assisté'),
         (METHODE_ESPECES, 'Espèces'),
     ]
 
@@ -701,6 +1105,17 @@ class Paiement(AgenceScopedModel):
             ("can_validate_payment", "Peut valider un paiement manuel (Espèces)"),
             ("can_cancel_payment", "Peut annuler une transaction erronée"),
             ("view_all_paiements", "Peut voir tous les paiements de son entreprise"),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['lease'],
+                condition=(
+                    Q(methode='USSD_ASSISTE')
+                    & Q(statut='EN_ATTENTE')
+                    & Q(est_annule=False)
+                ),
+                name='uniq_paie_ussd_attente_lease',
+            ),
         ]
         indexes = [
             models.Index(fields=['-created_at'], name='idx_paie_created_at'),

@@ -348,6 +348,11 @@ export ACCESS_TOKEN="<token-keycloak>"
 |---|---|---|
 | `GET`, `POST` | `/accounts/chauffeurs/` | Lister ou créer les chauffeurs du compte |
 | `GET`, `POST` | `/type-contrats/` | Lister ou créer les types de contrats |
+| `GET`, `POST` | `/agences/` | Lister ou créer les agences du compte |
+| `GET`, `POST` | `/proprietaires/` | Lister ou créer les propriétaires (bénéficiaires des collectes) |
+| `GET`, `PATCH`, `DELETE` | `/proprietaires/{id}/` | Consulter, modifier ou désactiver un propriétaire |
+| `GET`, `POST` | `/comptes-reception-proprietaires/` | Lister ou créer les comptes Mobile Money de réception d’un propriétaire |
+| `GET`, `PATCH`, `DELETE` | `/comptes-reception-proprietaires/{id}/` | Consulter, modifier ou désactiver un compte de réception |
 | `GET`, `POST` | `/contrats/` | Lister ou créer les contrats |
 | `GET`, `PATCH`, `DELETE` | `/contrats/{id}/` | Consulter, modifier ou supprimer un contrat sans historique |
 | `POST` | `/contrats/{id}/sous-contrats/` | Ajouter un sous-contrat |
@@ -358,6 +363,12 @@ export ACCESS_TOKEN="<token-keycloak>"
 | `GET` | `/leases/calendrier/` | Calendrier mensuel des leases |
 | `GET`, `POST` | `/paiements/` | Lister les paiements ou enregistrer un paiement en espèces |
 | `POST` | `/initier-paiement/` | Initier un panier Mobile Money |
+| `POST` | `/initier-paiement-ussd/` | Initier un transfert USSD assisté vers le compte du propriétaire |
+| `POST` | `/soumettre-preuve-paiement-ussd/` | Soumettre la preuve SMS capturée après le transfert USSD |
+| `GET` | `/preuves-paiement-ussd/` | Consulter les preuves de paiement USSD |
+| `GET` | `/preuves-paiement-ussd/{id}/` | Détail d’une preuve de paiement USSD |
+| `POST` | `/preuves-paiement-ussd/{id}/valider/` | Valider une preuve et déclencher la ventilation des paiements |
+| `POST` | `/preuves-paiement-ussd/{id}/rejeter/` | Rejeter une preuve (`{"motif": "..."}`) et libérer ses leases |
 | `GET` | `/transactions/` | Consulter les sessions de paiement |
 | `GET`, `POST`, `PATCH` | `/parametres/` | Gérer les jours de repos du partenaire |
 | `GET`, `POST` | `/regles-penalites/` | Gérer les règles de pénalité |

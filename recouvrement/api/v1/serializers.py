@@ -6,8 +6,9 @@ from django.utils import timezone
 from rest_framework import serializers
 from decimal import Decimal
 from django_q.models import Schedule
-from recouvrement.models import Agence, Contrat, Lease, Paiement, TypeContrat, Parametre, ReglePenalite, Penalite, \
-    SessionPaiement, RegleGenerationLease
+from core.utils import format_phone_cm
+from recouvrement.models import Agence, CompteReceptionProprietaire, Contrat, Lease, Paiement, TypeContrat, Parametre, \
+    PreuvePaiementUSSD, Proprietaire, ReglePenalite, Penalite, SessionPaiement, RegleGenerationLease
 
 
 class DateSeulementEnLectureMixin:
@@ -127,6 +128,141 @@ class AgenceSerializer(serializers.ModelSerializer):
         return code
 
 
+class CompteReceptionProprietaireNesteeSerializer(serializers.ModelSerializer):
+    """Vue allégée utilisée en lecture seule dans le détail d'un propriétaire."""
+
+    operateur_display = serializers.CharField(
+        source='get_operateur_display',
+        read_only=True,
+    )
+
+    class Meta:
+        model = CompteReceptionProprietaire
+        fields = [
+            'id', 'operateur', 'operateur_display', 'numero',
+            'nom_titulaire', 'actif',
+        ]
+        read_only_fields = fields
+
+
+class ProprietaireSerializer(serializers.ModelSerializer):
+    comptes_reception = CompteReceptionProprietaireNesteeSerializer(
+        many=True,
+        read_only=True,
+    )
+
+    class Meta:
+        model = Proprietaire
+        fields = [
+            'id', 'compte_id', 'nom_complet', 'actif',
+            'comptes_reception', 'created_at', 'updated_at',
+        ]
+        read_only_fields = [
+            'id', 'compte_id', 'comptes_reception',
+            'created_at', 'updated_at',
+        ]
+
+    def validate_nom_complet(self, value):
+        nom = (value or '').strip()
+        if not nom:
+            raise serializers.ValidationError(
+                "Le nom du propriétaire est obligatoire."
+            )
+        return nom
+
+
+class CompteReceptionProprietaireSerializer(serializers.ModelSerializer):
+    proprietaire = serializers.PrimaryKeyRelatedField(
+        queryset=Proprietaire.objects.all(),
+        error_messages={
+            'does_not_exist': "Le propriétaire sélectionné n'existe pas.",
+            'incorrect_type': (
+                "L'identifiant du propriétaire doit être un nombre entier."
+            ),
+        },
+    )
+    proprietaire_nom_complet = serializers.CharField(
+        source='proprietaire.nom_complet',
+        read_only=True,
+        default=None,
+    )
+    # CharField explicite : le ChoiceField auto-généré par le ModelSerializer
+    # rejetterait "orange"/"mtn" en minuscule AVANT que validate_operateur()
+    # ait la moindre chance de normaliser la casse.
+    operateur = serializers.CharField(max_length=10)
+    operateur_display = serializers.CharField(
+        source='get_operateur_display',
+        read_only=True,
+    )
+
+    class Meta:
+        model = CompteReceptionProprietaire
+        fields = [
+            'id', 'compte_id', 'proprietaire', 'proprietaire_nom_complet',
+            'operateur', 'operateur_display', 'numero', 'nom_titulaire',
+            'actif', 'created_at', 'updated_at',
+        ]
+        read_only_fields = [
+            'id', 'compte_id', 'proprietaire_nom_complet',
+            'operateur_display', 'created_at', 'updated_at',
+        ]
+
+    def _compte_id_cible(self):
+        if self.instance is not None:
+            return self.instance.compte_id
+
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        if user is None:
+            return None
+        if user.is_superuser:
+            return request.data.get('compte_id')
+        return user.compte_id
+
+    def validate_proprietaire(self, value):
+        compte_id = self._compte_id_cible()
+        if compte_id is not None:
+            try:
+                compte_id_int = int(compte_id)
+            except (TypeError, ValueError):
+                raise serializers.ValidationError(
+                    "Le compte_id fourni n'est pas un nombre entier valide."
+                )
+            if value.compte_id != compte_id_int:
+                # Message volontairement identique à celui d'un identifiant
+                # inexistant : ne pas laisser deviner qu'un propriétaire
+                # existe chez un autre partenaire.
+                raise serializers.ValidationError(
+                    "Le propriétaire sélectionné n'existe pas."
+                )
+        return value
+
+    def validate_operateur(self, value):
+        operateur = (value or '').strip().upper()
+        operateurs_valides = {
+            choix[0]
+            for choix in CompteReceptionProprietaire.OPERATEUR_CHOICES
+        }
+        if operateur not in operateurs_valides:
+            raise serializers.ValidationError(
+                "L'opérateur doit être ORANGE ou MTN."
+            )
+        return operateur
+
+    def validate_numero(self, value):
+        numero = format_phone_cm(value)
+        # format_phone_cm ne fait que nettoyer/préfixer : elle ne rejette
+        # jamais un texte invalide. On vérifie ici le format final attendu
+        # (indicatif 237 + 9 chiffres), sans quoi ce compte ne pourra
+        # jamais être reconnu lors du rapprochement d'une preuve USSD.
+        if not re.match(r'^237\d{9}$', numero):
+            raise serializers.ValidationError(
+                "Le numéro doit être un numéro camerounais valide (9 "
+                "chiffres, avec ou sans l'indicatif 237)."
+            )
+        return numero
+
+
 class TypeContratSerializer(serializers.ModelSerializer):
     class Meta:
         model = TypeContrat
@@ -176,6 +312,11 @@ class SousContratSerializer(
     """
     specificites = serializers.JSONField(required=False, allow_null=True)
     montant_paye = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, default=0)
+    proprietaire_nom_complet = serializers.CharField(
+        source='proprietaire.nom_complet',
+        read_only=True,
+        default=None,
+    )
     champs_datetime_en_date = ('prochaine_echeance',)
 
     class Meta:
@@ -184,11 +325,11 @@ class SousContratSerializer(
             'id','reference', 'type_contrat', 'montant_total','montant_restant','montant_paye', 'montant_par_paiement',
             'frequence', 'date_debut', 'date_fin', 'prochaine_echeance',
              'statut', 'specificites', 'regle_generation',
-            'config_paiement'
+            'proprietaire', 'proprietaire_nom_complet', 'config_paiement'
         ]
         read_only_fields = [
             'id', 'reference', 'statut', 'montant_restant',
-            'config_paiement',
+            'proprietaire', 'proprietaire_nom_complet', 'config_paiement',
         ]
         extra_kwargs = {
             'montant_total': {'required': True},
@@ -239,6 +380,24 @@ class ContratSerializer(
             'incorrect_type': "L'identifiant de l'agence doit être un nombre entier."
         }
     )
+    proprietaire = serializers.PrimaryKeyRelatedField(
+        queryset=Proprietaire.objects.all(),
+        required=True,
+        allow_null=False,
+        error_messages={
+            'does_not_exist': "Le propriétaire sélectionné n'existe pas.",
+            'incorrect_type': (
+                "L'identifiant du propriétaire doit être un nombre entier."
+            ),
+            'null': "Le propriétaire du contrat est obligatoire.",
+            'required': "Le propriétaire du contrat est obligatoire.",
+        },
+    )
+    proprietaire_nom_complet = serializers.CharField(
+        source='proprietaire.nom_complet',
+        read_only=True,
+        default=None,
+    )
     champs_datetime_en_date = ('prochaine_echeance',)
 
     class Meta:
@@ -246,6 +405,7 @@ class ContratSerializer(
         fields = [
             'id', 'reference', 'compte_id', 'chauffeur', 'immatriculation', 'vin', 'nom_complet',
             'type_contrat', 'type_contrat_libelle', 'parent','agence', 'agence_nom',
+            'proprietaire', 'proprietaire_nom_complet',
             'enregistre_par', 'enregistre_par_nom_complet', 'chauffeur_nom_complet',
             'montant_total', 'montant_restant', 'montant_paye', 'montant_par_paiement',
             'frequence', 'date_debut', 'date_fin', 'prochaine_echeance',
@@ -331,8 +491,50 @@ class ContratSerializer(
 
         return value
 
+    def validate_proprietaire(self, value):
+        request = self.context.get('request')
+        compte_id = getattr(self.instance, 'compte_id', None)
+
+        if request and getattr(request, 'user', None):
+            if request.user.is_superuser:
+                compte_id = request.data.get('compte_id', compte_id)
+            else:
+                compte_id = request.user.compte_id
+
+        if compte_id is not None and value.compte_id != int(compte_id):
+            raise serializers.ValidationError(
+                "Le propriétaire spécifié n'appartient pas à votre "
+                "entreprise."
+            )
+
+        proprietaire_actuel_id = getattr(
+            self.instance,
+            'proprietaire_id',
+            None,
+        )
+        if not value.actif and proprietaire_actuel_id != value.id:
+            raise serializers.ValidationError(
+                "Un propriétaire inactif ne peut pas recevoir un contrat."
+            )
+
+        if (
+            self.instance is not None
+            and self.instance.parent_id is None
+            and proprietaire_actuel_id != value.id
+            and self.instance.possede_historique_financier()
+        ):
+            raise serializers.ValidationError(
+                "Le propriétaire ne peut plus être modifié car ce contrat "
+                "ou l'un de ses sous-contrats possède déjà un historique "
+                "financier."
+            )
+
+        return value
+
     def get_fields(self):
         fields = super().get_fields()
+        if self.instance is not None and self.instance.parent_id is not None:
+            fields['proprietaire'].read_only = True
         return fields
 
     def validate(self, attrs):
@@ -343,12 +545,36 @@ class ContratSerializer(
         parent = attrs.get('parent', getattr(self.instance, 'parent', None))
         chauffeur = attrs.get('chauffeur', getattr(self.instance, 'chauffeur', None))
         agence = attrs.get('agence', getattr(self.instance, 'agence', None))
+        proprietaire = attrs.get(
+            'proprietaire',
+            getattr(self.instance, 'proprietaire', None),
+        )
+
+        if (
+            self.instance is None
+            and parent is None
+            and proprietaire is None
+        ):
+            raise serializers.ValidationError({
+                'proprietaire': "Le propriétaire du contrat est obligatoire."
+            })
 
         if parent is not None and getattr(agence, 'id', None) != parent.agence_id:
             raise serializers.ValidationError({
                 'agence': (
                     "Un sous-contrat doit toujours appartenir à la même "
                     "agence que son contrat parent."
+                )
+            })
+
+        if (
+            parent is not None
+            and getattr(proprietaire, 'id', None) != parent.proprietaire_id
+        ):
+            raise serializers.ValidationError({
+                'proprietaire': (
+                    "Un sous-contrat doit toujours appartenir au même "
+                    "propriétaire que son contrat parent."
                 )
             })
 
@@ -420,6 +646,7 @@ class ContratSerializer(
                 sc_instance_data = sc_serializer.validated_data
                 sc_instance_data['parent'] = parent_contrat
                 sc_instance_data['agence'] = parent_contrat.agence
+                sc_instance_data['proprietaire'] = parent_contrat.proprietaire
                 sc_instance_data['chauffeur'] = parent_contrat.chauffeur
                 sc_instance_data['compte_id'] = parent_contrat.compte_id
                 sc_instance_data['nom_complet'] = parent_contrat.nom_complet
@@ -481,6 +708,7 @@ class LeaseSerializer(DateSeulementEnLectureMixin, serializers.ModelSerializer):
         default=None,
     )
     reste_a_payer = serializers.SerializerMethodField()
+    paiement_en_verification = serializers.SerializerMethodField()
     champs_datetime_en_date = ('date_echeance',)
 
     class Meta:
@@ -497,6 +725,7 @@ class LeaseSerializer(DateSeulementEnLectureMixin, serializers.ModelSerializer):
             'montant_attendu',
             'montant_paye',
             'reste_a_payer',
+            'paiement_en_verification',
             'statut',
             'created_at'
         ]
@@ -505,9 +734,26 @@ class LeaseSerializer(DateSeulementEnLectureMixin, serializers.ModelSerializer):
     def get_reste_a_payer(self, obj):
         return obj.montant_attendu - obj.montant_paye
 
+    def get_paiement_en_verification(self, obj):
+        valeur_annotee = getattr(
+            obj,
+            'paiement_ussd_en_verification',
+            None,
+        )
+        if valeur_annotee is not None:
+            return valeur_annotee
+
+        return obj.paiements.filter(
+            methode=Paiement.METHODE_USSD_ASSISTE,
+            statut=Paiement.STATUT_EN_ATTENTE,
+            session__canal=SessionPaiement.CANAL_USSD_ASSISTE,
+            session__statut=SessionPaiement.STATUT_EN_VERIFICATION,
+        ).exists()
+
 
 class CalendrierSerializer(DateSeulementEnLectureMixin, serializers.ModelSerializer):
     chauffeur_nom = serializers.CharField(source='contrat.chauffeur.nom_complet', read_only=True, default="Inconnu")
+    paiement_en_verification = serializers.SerializerMethodField()
     champs_datetime_en_date = ('date_echeance',)
 
 
@@ -515,8 +761,24 @@ class CalendrierSerializer(DateSeulementEnLectureMixin, serializers.ModelSeriali
         model = Lease
         fields = [
             'id', 'date_echeance',
-            'chauffeur_nom','statut',
+            'chauffeur_nom', 'statut', 'paiement_en_verification',
         ]
+
+    def get_paiement_en_verification(self, obj):
+        valeur_annotee = getattr(
+            obj,
+            'paiement_ussd_en_verification',
+            None,
+        )
+        if valeur_annotee is not None:
+            return valeur_annotee
+
+        return obj.paiements.filter(
+            methode=Paiement.METHODE_USSD_ASSISTE,
+            statut=Paiement.STATUT_EN_ATTENTE,
+            session__canal=SessionPaiement.CANAL_USSD_ASSISTE,
+            session__statut=SessionPaiement.STATUT_EN_VERIFICATION,
+        ).exists()
 
 
 class LignePaiementSerializer(serializers.Serializer):
@@ -529,6 +791,8 @@ class LignePaiementSerializer(serializers.Serializer):
             lease_query = Lease.objects.select_related(
                 'contrat',
                 'contrat__config_paiement',
+                'contrat__agence',
+                'contrat__proprietaire',
             ).filter(
                 id=value,
                 contrat__compte_id=user.compte_id,
@@ -565,6 +829,7 @@ class InitiationPaiementSerializer(serializers.Serializer):
     """
     Le serializer principal qui reçoit la requête globale d'initiation de paiement.
     """
+    verifier_meme_vehicule = True
     lignes = LignePaiementSerializer(many=True, allow_empty=False)
     phone_number = serializers.CharField(max_length=20, required=True, allow_blank=False)
 
@@ -599,7 +864,7 @@ class InitiationPaiementSerializer(serializers.Serializer):
             root_id = contrat.parent_id if contrat.parent_id else contrat.id
             root_parent_ids.add(root_id)
 
-        if len(root_parent_ids) > 1:
+        if self.verifier_meme_vehicule and len(root_parent_ids) > 1:
             raise serializers.ValidationError({
                 "lignes": "Mélange de contrats appartenant à des véhicules différents interdit."
             })
@@ -643,6 +908,250 @@ class InitiationPaiementSerializer(serializers.Serializer):
             })
 
         return attrs
+
+
+class InitiationPaiementUSSDSerializer(InitiationPaiementSerializer):
+    """Valide la sélection avant de préparer un transfert USSD manuel."""
+
+    verifier_meme_vehicule = False
+    operateur = serializers.CharField(max_length=10)
+    phone_number = serializers.CharField(
+        max_length=20,
+        required=False,
+        allow_blank=True,
+        default='',
+    )
+
+    def validate_operateur(self, value):
+        operateur = (value or '').strip().upper()
+        operateurs_valides = {
+            choix[0]
+            for choix in CompteReceptionProprietaire.OPERATEUR_CHOICES
+        }
+        if operateur not in operateurs_valides:
+            raise serializers.ValidationError(
+                "L'opérateur doit être ORANGE ou MTN."
+            )
+        return operateur
+
+
+class SoumissionPreuvePaiementUSSDSerializer(serializers.Serializer):
+    """Payload capturé sur le téléphone après le transfert USSD."""
+
+    sessionReference = serializers.CharField(max_length=100)
+    network = serializers.CharField(max_length=10)
+    rawText = serializers.CharField(allow_blank=False)
+    amount = serializers.DecimalField(max_digits=12, decimal_places=2)
+    senderName = serializers.CharField(
+        max_length=255,
+        required=False,
+        allow_blank=True,
+        default='',
+    )
+    senderPhone = serializers.CharField(max_length=20)
+    recipientName = serializers.CharField(
+        max_length=255,
+        required=False,
+        allow_blank=True,
+        default='',
+    )
+    recipientPhone = serializers.CharField(max_length=20)
+    reference = serializers.CharField(max_length=100)
+    timestamp = serializers.DateTimeField(required=False, allow_null=True)
+    fee = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        required=False,
+        default=Decimal('0.00'),
+        min_value=Decimal('0.00'),
+    )
+    commission = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        required=False,
+        default=Decimal('0.00'),
+        min_value=Decimal('0.00'),
+    )
+    newBalance = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        required=False,
+        allow_null=True,
+    )
+    capturedAtDevice = serializers.DateTimeField()
+
+    def validate_network(self, value):
+        operateur = (value or '').strip().upper()
+        operateurs_valides = {
+            choix[0]
+            for choix in CompteReceptionProprietaire.OPERATEUR_CHOICES
+        }
+        if operateur not in operateurs_valides:
+            raise serializers.ValidationError(
+                "L'opérateur doit être ORANGE ou MTN."
+            )
+        return operateur
+
+    def validate_reference(self, value):
+        reference = (value or '').strip().upper()
+        if not reference:
+            raise serializers.ValidationError(
+                "La référence opérateur est obligatoire."
+            )
+        return reference
+
+    def validate(self, attrs):
+        request = self.context['request']
+        session_query = SessionPaiement.objects.select_related(
+            'proprietaire',
+            'compte_reception',
+        ).filter(reference=attrs['sessionReference'])
+
+        if not request.user.is_superuser:
+            session_query = session_query.filter(
+                compte_id=request.user.compte_id,
+            )
+        if not request.user.is_staff and not request.user.is_superuser:
+            session_query = session_query.filter(utilisateur=request.user)
+
+        session = session_query.first()
+        if session is None:
+            raise serializers.ValidationError({
+                'sessionReference': (
+                    "Session USSD introuvable ou accès refusé."
+                ),
+            })
+        if session.canal != SessionPaiement.CANAL_USSD_ASSISTE:
+            raise serializers.ValidationError({
+                'sessionReference': (
+                    "Cette session n'est pas un paiement USSD assisté."
+                ),
+            })
+        if session.statut != SessionPaiement.STATUT_EN_ATTENTE:
+            raise serializers.ValidationError({
+                'sessionReference': (
+                    "Cette session n'accepte plus de nouvelle preuve."
+                ),
+            })
+        if PreuvePaiementUSSD.objects.filter(session=session).exists():
+            raise serializers.ValidationError({
+                'sessionReference': (
+                    "Une preuve a déjà été soumise pour cette session."
+                ),
+            })
+
+        if attrs['network'] != session.operateur:
+            raise serializers.ValidationError({
+                'network': (
+                    "L'opérateur ne correspond pas à celui de la session."
+                ),
+            })
+
+        numero_destinataire = format_phone_cm(attrs['recipientPhone'])
+        if numero_destinataire != session.numero_destinataire:
+            raise serializers.ValidationError({
+                'recipientPhone': (
+                    "Le numéro destinataire ne correspond pas au compte de "
+                    "réception du propriétaire."
+                ),
+            })
+
+        numero_expediteur = format_phone_cm(attrs['senderPhone'])
+        if session.telephone and numero_expediteur != session.telephone:
+            raise serializers.ValidationError({
+                'senderPhone': (
+                    "Le numéro expéditeur ne correspond pas au numéro "
+                    "déclaré lors de l'initiation."
+                ),
+            })
+
+        if attrs['amount'] != session.montant_total:
+            raise serializers.ValidationError({
+                'amount': (
+                    "Le montant transféré ne correspond pas au montant "
+                    "total de la session."
+                ),
+            })
+
+        if PreuvePaiementUSSD.objects.filter(
+            compte_id=session.compte_id,
+            operateur=attrs['network'],
+            reference_operateur=attrs['reference'],
+        ).exists():
+            raise serializers.ValidationError({
+                'reference': (
+                    "Cette référence de transaction a déjà été utilisée."
+                ),
+            })
+
+        attrs['session'] = session
+        attrs['senderPhone'] = numero_expediteur
+        attrs['recipientPhone'] = numero_destinataire
+        return attrs
+
+
+class PreuvePaiementUSSDSerializer(serializers.ModelSerializer):
+    session_reference = serializers.CharField(
+        source='session.reference',
+        read_only=True,
+    )
+    proprietaire_nom_complet = serializers.CharField(
+        source='session.proprietaire.nom_complet',
+        read_only=True,
+        default=None,
+    )
+    operateur_display = serializers.CharField(
+        source='get_operateur_display',
+        read_only=True,
+    )
+    verifie_par_nom_complet = serializers.CharField(
+        source='verifie_par.nom_complet',
+        read_only=True,
+        default=None,
+    )
+
+    class Meta:
+        model = PreuvePaiementUSSD
+        fields = [
+            'id',
+            'compte_id',
+            'session',
+            'session_reference',
+            'proprietaire_nom_complet',
+            'operateur',
+            'operateur_display',
+            'reference_operateur',
+            'texte_brut',
+            'montant_transfere',
+            'frais_operateur',
+            'commission',
+            'nouveau_solde',
+            'nom_expediteur',
+            'numero_expediteur',
+            'nom_destinataire',
+            'numero_destinataire',
+            'date_transaction',
+            'capture_appareil_le',
+            'statut',
+            'verifie_par',
+            'verifie_par_nom_complet',
+            'verifie_le',
+            'motif_rejet',
+            'created_at',
+        ]
+        # Lecture seule : la création se fait via /soumettre-preuve-paiement-ussd/
+        # et les transitions de statut via les actions valider/rejeter.
+        read_only_fields = fields
+
+
+class RejeterPreuveUSSDSerializer(serializers.Serializer):
+    """Payload minimal exigé pour rejeter une preuve de paiement USSD."""
+
+    motif = serializers.CharField(
+        allow_blank=False,
+        max_length=255,
+        trim_whitespace=True,
+    )
 
 
 class PaiementSerializer(serializers.ModelSerializer):
@@ -851,6 +1360,8 @@ class ReglePenaliteSerializer(serializers.ModelSerializer):
             data['cron_expression'] = None
 
         return data
+
+
 class PenaliteSerializer(serializers.ModelSerializer):
     agence_nom = serializers.CharField(
         source='agence.nom',
@@ -888,12 +1399,23 @@ class SessionPaiementSerializer(serializers.ModelSerializer):
         read_only=True,
         default=None,
     )
+    proprietaire_nom_complet = serializers.CharField(
+        source='proprietaire.nom_complet',
+        read_only=True,
+        default=None,
+    )
+    preuve_ussd_statut = serializers.CharField(
+        source='preuve_ussd.statut',
+        read_only=True,
+        default=None,
+    )
 
     class Meta:
         model = SessionPaiement
         fields = [
             'id',
             'reference',
+            'canal',
             'statut',
             'montant_total',
             'telephone',
@@ -901,6 +1423,13 @@ class SessionPaiementSerializer(serializers.ModelSerializer):
             'agence_nom',
             'config_paiement',
             'config_paiement_nom',
+            'proprietaire',
+            'proprietaire_nom_complet',
+            'compte_reception',
+            'operateur',
+            'numero_destinataire',
+            'nom_destinataire',
+            'preuve_ussd_statut',
             'date_validation',
             'created_at',
         ]

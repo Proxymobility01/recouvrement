@@ -5,6 +5,7 @@ from django.contrib import admin, messages
 from django.contrib.admin.helpers import ACTION_CHECKBOX_NAME
 from django.db import transaction
 from django.db.models import Count
+from django.forms.models import BaseInlineFormSet
 from django.shortcuts import render
 from django.utils import timezone
 from django_q.models import Schedule
@@ -12,12 +13,17 @@ from croniter import croniter
 from rangefilter.filters import DateRangeFilter, DateRangeQuickSelectListFilter
 from accounts.models import ConfigPaiement
 from core.admin_mixins import IdCompteAdminMixin
+from core.exceptions import CustomAPIException
 from .services import annuler_leases_et_prolonger, AnnulationLeaseError
+from .services_ussd import PaiementUSSDService
 from .models import (
     Agence,
+    Proprietaire,
+    CompteReceptionProprietaire,
     TypeContrat,
     Contrat,
     SessionPaiement,
+    PreuvePaiementUSSD,
     Lease,
     Paiement,
     Parametre,
@@ -139,6 +145,7 @@ class ContratAdminForm(forms.ModelForm):
         compte_id = cleaned_data.get('compte_id')
         agence = cleaned_data.get('agence')
         parent = cleaned_data.get('parent')
+        proprietaire = cleaned_data.get('proprietaire')
         regle_generation = cleaned_data.get('regle_generation')
         config_paiement = cleaned_data.get('config_paiement')
 
@@ -177,6 +184,56 @@ class ContratAdminForm(forms.ModelForm):
             # sous-contrat est donc remplacée par celle du parent.
             config_paiement = parent.config_paiement
             cleaned_data['config_paiement'] = config_paiement
+
+            proprietaire = parent.proprietaire
+            cleaned_data['proprietaire'] = proprietaire
+        elif proprietaire is None and not self.instance.pk:
+            self.add_error(
+                'proprietaire',
+                "Le propriétaire du contrat principal est obligatoire.",
+            )
+
+        if (
+            compte_id is not None
+            and proprietaire is not None
+            and proprietaire.compte_id != compte_id
+        ):
+            self.add_error(
+                'proprietaire',
+                "Le propriétaire doit appartenir au même compte que le "
+                "contrat.",
+            )
+
+        if (
+            proprietaire is not None
+            and not proprietaire.actif
+            and self.instance.proprietaire_id != proprietaire.id
+        ):
+            self.add_error(
+                'proprietaire',
+                "Un propriétaire inactif ne peut pas recevoir un contrat.",
+            )
+
+        proprietaire_actuel_id = getattr(
+            self.instance,
+            'proprietaire_id',
+            None,
+        )
+        proprietaire_demande_id = (
+            proprietaire.id if proprietaire is not None else None
+        )
+        if (
+            self.instance.pk
+            and self.instance.parent_id is None
+            and proprietaire_demande_id != proprietaire_actuel_id
+            and self.instance.possede_historique_financier()
+        ):
+            self.add_error(
+                'proprietaire',
+                "Le propriétaire ne peut plus être modifié car ce contrat "
+                "ou l'un de ses sous-contrats possède déjà un historique "
+                "financier.",
+            )
 
         agence_actuelle_id = getattr(self.instance, 'agence_id', None)
         agence_demandee_id = agence.id if agence is not None else None
@@ -308,6 +365,73 @@ class AgenceAdmin(IdCompteAdminMixin, admin.ModelAdmin):
     )
 
 
+class RejeterPreuvesUSSDForm(forms.Form):
+    motif = forms.CharField(
+        label='Motif du rejet',
+        widget=forms.Textarea(attrs={'rows': 4, 'cols': 70}),
+        help_text=(
+            "Ce motif sera conservé dans l'audit de chaque preuve "
+            "sélectionnée."
+        ),
+    )
+
+
+class CompteReceptionProprietaireInlineFormSet(BaseInlineFormSet):
+    def save_new(self, form, commit=True):
+        objet = form.save(commit=False)
+        objet.proprietaire = self.instance
+        objet.compte_id = self.instance.compte_id
+        if commit:
+            objet.save()
+            form.save_m2m()
+        return objet
+
+
+class CompteReceptionProprietaireInline(admin.TabularInline):
+    model = CompteReceptionProprietaire
+    formset = CompteReceptionProprietaireInlineFormSet
+    extra = 0
+    fields = ('operateur', 'numero', 'nom_titulaire', 'actif')
+
+
+@admin.register(Proprietaire)
+class ProprietaireAdmin(IdCompteAdminMixin, admin.ModelAdmin):
+    list_display = (
+        'id_compte', 'nom_complet', 'actif', 'created_at',
+    )
+    list_filter = ('actif', 'compte_id')
+    search_fields = (
+        'nom_complet_search', 'comptes_reception__numero',
+    )
+    readonly_fields = (
+        'nom_complet_search', 'created_at', 'updated_at',
+    )
+    ordering = ('nom_complet',)
+    inlines = (CompteReceptionProprietaireInline,)
+
+
+@admin.register(CompteReceptionProprietaire)
+class CompteReceptionProprietaireAdmin(
+    IdCompteAdminMixin,
+    admin.ModelAdmin,
+):
+    list_display = (
+        'id_compte', 'proprietaire', 'operateur', 'numero',
+        'nom_titulaire', 'actif', 'created_at',
+    )
+    list_select_related = ('proprietaire',)
+    list_filter = ('operateur', 'actif', 'compte_id')
+    search_fields = (
+        'numero', 'nom_titulaire_search',
+        'proprietaire__nom_complet_search',
+    )
+    raw_id_fields = ('proprietaire',)
+    readonly_fields = (
+        'nom_titulaire_search', 'created_at', 'updated_at',
+    )
+    ordering = ('proprietaire__nom_complet', 'operateur')
+
+
 @admin.register(TypeContrat)
 class TypeContratAdmin(IdCompteAdminMixin, admin.ModelAdmin):
     list_display = (
@@ -333,6 +457,7 @@ class ContratAdmin(IdCompteAdminMixin, admin.ModelAdmin):
         'type_contrat',
         'statut',
         'agence',
+        'proprietaire',
         'regle_generation',
         'config_paiement',
         'montant_total',
@@ -346,6 +471,7 @@ class ContratAdmin(IdCompteAdminMixin, admin.ModelAdmin):
     list_select_related = (
         'type_contrat',
         'agence',
+        'proprietaire',
         'regle_generation',
         'regle_penalite',
         'config_paiement',
@@ -358,6 +484,7 @@ class ContratAdmin(IdCompteAdminMixin, admin.ModelAdmin):
         'type_contrat',
         'compte_id',
         'agence',
+        'proprietaire',
         'regle_generation',
         'config_paiement',
         'regle_penalite',
@@ -371,6 +498,8 @@ class ContratAdmin(IdCompteAdminMixin, admin.ModelAdmin):
         'agence__code',
         'agence__nom_search',
         'agence__zone_search',
+        'proprietaire__nom_complet_search',
+        'proprietaire__comptes_reception__numero',
     )
     date_hierarchy = 'created_at'
 
@@ -380,6 +509,7 @@ class ContratAdmin(IdCompteAdminMixin, admin.ModelAdmin):
         'enregistre_par',
         'parent',
         'agence',
+        'proprietaire',
         'regle_generation',
         'config_paiement',
         'regle_penalite',
@@ -393,6 +523,7 @@ class ContratAdmin(IdCompteAdminMixin, admin.ModelAdmin):
         champs = list(super().get_readonly_fields(request, obj))
         if obj is not None and obj.parent_id is not None:
             champs.append('config_paiement')
+            champs.append('proprietaire')
         return tuple(champs)
 
     def save_model(self, request, obj, form, change):
@@ -421,7 +552,7 @@ class ContratAdmin(IdCompteAdminMixin, admin.ModelAdmin):
         ('Informations Générales', {
             'fields': (
                 'compte_id', 'agence', 'reference', 'type_contrat',
-                'parent', 'statut',
+                'parent', 'proprietaire', 'statut',
             )
         }),
         ('Acteurs', {
@@ -619,18 +750,26 @@ class TransactionAdmin(IdCompteAdminMixin, admin.ModelAdmin):
         'id_compte',
         'reference',
         'montant_total',
+        'canal',
         'statut',
         'agence',
+        'proprietaire',
+        'operateur',
+        'numero_destinataire',
         'config_paiement',
         'telephone',
         'date_validation',
         'created_at',
     )
-    list_select_related = ('agence', 'config_paiement', 'utilisateur')
+    list_select_related = (
+        'agence', 'config_paiement', 'utilisateur', 'proprietaire',
+        'compte_reception',
+    )
     list_filter = (
         ('created_at', DateRangeAvecHierFilter),
         ('date_validation', DateRangeAvecHierFilter),
-        'statut', 'compte_id', 'agence',
+        'statut', 'canal', 'operateur', 'compte_id', 'agence',
+        'proprietaire',
     )
     search_fields = (
         'reference',
@@ -640,8 +779,10 @@ class TransactionAdmin(IdCompteAdminMixin, admin.ModelAdmin):
         'agence__code',
         'agence__nom_search',
         'agence__zone_search',
+        'proprietaire__nom_complet_search',
+        'numero_destinataire',
     )
-    raw_id_fields = ('utilisateur',)
+    raw_id_fields = ('utilisateur', 'proprietaire', 'compte_reception')
 
     # Personne ne doit pouvoir modifier un payload d'audit ou une date de validation de passerelle
     readonly_fields = (
@@ -649,12 +790,162 @@ class TransactionAdmin(IdCompteAdminMixin, admin.ModelAdmin):
         'gateway_reference',
         'agence',
         'config_paiement',
+        'proprietaire',
+        'compte_reception',
+        'operateur',
+        'numero_destinataire',
+        'nom_destinataire',
         'webhook_payload',
         'date_validation',
         'created_at',
         'updated_at',
     )
     ordering = ('-created_at',)
+
+
+@admin.register(PreuvePaiementUSSD)
+class PreuvePaiementUSSDAdmin(IdCompteAdminMixin, admin.ModelAdmin):
+    list_display = (
+        'id_compte', 'session', 'statut', 'operateur',
+        'reference_operateur', 'montant_transfere', 'frais_operateur',
+        'numero_expediteur', 'numero_destinataire', 'created_at',
+    )
+    list_select_related = ('session', 'verifie_par')
+    list_filter = (
+        ('created_at', DateRangeAvecHierFilter),
+        ('verifie_le', DateRangeAvecHierFilter),
+        'statut', 'operateur', 'compte_id',
+    )
+    search_fields = (
+        'session__reference', 'reference_operateur', 'numero_expediteur',
+        'numero_destinataire', 'nom_expediteur', 'nom_destinataire',
+    )
+    raw_id_fields = ('session', 'verifie_par')
+    readonly_fields = tuple(
+        field.name for field in PreuvePaiementUSSD._meta.fields
+    )
+    ordering = ('-created_at',)
+    actions = ('valider_preuves_ussd', 'rejeter_preuves_ussd')
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    def get_actions(self, request):
+        actions = super().get_actions(request)
+        if not request.user.has_perm(
+            'recouvrement.can_validate_ussd_payment'
+        ):
+            actions.pop('valider_preuves_ussd', None)
+            actions.pop('rejeter_preuves_ussd', None)
+        return actions
+
+    @admin.action(description='Valider les preuves USSD sélectionnées')
+    def valider_preuves_ussd(self, request, queryset):
+        validees = 0
+        deja_traitees = 0
+        erreurs = []
+
+        for preuve in queryset.order_by('id'):
+            try:
+                _, modifiee = PaiementUSSDService.valider_preuve(
+                    preuve_id=preuve.id,
+                    agent=request.user,
+                )
+            except CustomAPIException as exc:
+                erreurs.append(f"Preuve #{preuve.id} : {exc.dev_message}")
+                continue
+
+            if modifiee:
+                validees += 1
+            else:
+                deja_traitees += 1
+
+        if validees:
+            self.message_user(
+                request,
+                f"{validees} preuve(s) validée(s). La ventilation des "
+                "paiements a été déclenchée.",
+                level=messages.SUCCESS,
+            )
+        if deja_traitees:
+            self.message_user(
+                request,
+                f"{deja_traitees} preuve(s) étaient déjà validée(s).",
+                level=messages.INFO,
+            )
+        if erreurs:
+            self.message_user(
+                request,
+                ' | '.join(erreurs),
+                level=messages.ERROR,
+            )
+
+    @admin.action(description='Rejeter les preuves USSD sélectionnées')
+    def rejeter_preuves_ussd(self, request, queryset):
+        if 'appliquer_rejet_ussd' in request.POST:
+            form = RejeterPreuvesUSSDForm(request.POST)
+            if form.is_valid():
+                rejetees = 0
+                deja_traitees = 0
+                erreurs = []
+
+                for preuve in queryset.order_by('id'):
+                    try:
+                        _, modifiee = PaiementUSSDService.rejeter_preuve(
+                            preuve_id=preuve.id,
+                            agent=request.user,
+                            motif=form.cleaned_data['motif'],
+                        )
+                    except CustomAPIException as exc:
+                        erreurs.append(
+                            f"Preuve #{preuve.id} : {exc.dev_message}"
+                        )
+                        continue
+
+                    if modifiee:
+                        rejetees += 1
+                    else:
+                        deja_traitees += 1
+
+                if rejetees:
+                    self.message_user(
+                        request,
+                        f"{rejetees} preuve(s) rejetée(s). Les échéances "
+                        "peuvent être payées à nouveau.",
+                        level=messages.SUCCESS,
+                    )
+                if deja_traitees:
+                    self.message_user(
+                        request,
+                        f"{deja_traitees} preuve(s) étaient déjà rejetée(s).",
+                        level=messages.INFO,
+                    )
+                if erreurs:
+                    self.message_user(
+                        request,
+                        ' | '.join(erreurs),
+                        level=messages.ERROR,
+                    )
+                return None
+        else:
+            form = RejeterPreuvesUSSDForm()
+
+        return render(
+            request,
+            'admin/recouvrement/rejeter_preuves_ussd.html',
+            {
+                **self.admin_site.each_context(request),
+                'title': 'Rejeter des preuves de paiement USSD',
+                'preuves': queryset.select_related('session'),
+                'form': form,
+                'action_checkbox_name': ACTION_CHECKBOX_NAME,
+                'selection': queryset.values_list('pk', flat=True),
+                'opts': self.model._meta,
+            },
+        )
 
 
 @admin.register(Lease)

@@ -1,0 +1,68 @@
+{% extends "admin/base_site.html" %}
+
+{% block breadcrumbs %}
+  <div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">Accueil</a>
+    &rsaquo; <a href="{% url 'admin:app_list' app_label=opts.app_label %}">{{ opts.app_config.verbose_name }}</a>
+    &rsaquo; <a href="{% url 'admin:recouvrement_preuvepaiementussd_changelist' %}">{{ opts.verbose_name_plural|capfirst }}</a>
+    &rsaquo; Rejet
+  </div>
+{% endblock %}
+
+{% block content %}
+  <p>
+    Vous êtes sur le point de rejeter
+    <strong>{{ preuves|length }}</strong> preuve(s) de paiement USSD.
+    Les lignes de paiement concernées seront libérées sans modifier les
+    montants des leases et des contrats.
+  </p>
+
+  <ul>
+    {% for preuve in preuves %}
+      <li>
+        <strong>#{{ preuve.id }}</strong> &mdash;
+        {{ preuve.session.reference }} &mdash;
+        {{ preuve.reference_operateur }} &mdash;
+        {{ preuve.montant_transfere }} FCFA &mdash;
+        {{ preuve.get_statut_display }}
+      </li>
+    {% endfor %}
+  </ul>
+
+  <form method="post">
+    {% csrf_token %}
+
+    {% for pk in selection %}
+      <input type="hidden" name="{{ action_checkbox_name }}" value="{{ pk }}">
+    {% endfor %}
+    <input type="hidden" name="action" value="rejeter_preuves_ussd">
+
+    <fieldset class="module aligned">
+      {% for field in form %}
+        <div class="form-row">
+          {{ field.errors }}
+          {{ field.label_tag }}
+          {{ field }}
+          {% if field.help_text %}
+            <div class="help">{{ field.help_text }}</div>
+          {% endif %}
+        </div>
+      {% endfor %}
+    </fieldset>
+
+    <div class="submit-row">
+      <input
+        type="submit"
+        name="appliquer_rejet_ussd"
+        value="Confirmer le rejet"
+        class="default"
+      >
+      <a
+        href="{% url 'admin:recouvrement_preuvepaiementussd_changelist' %}"
+        class="button cancel-link"
+      >
+        Annuler
+      </a>
+    </div>
+  </form>
+{% endblock %}

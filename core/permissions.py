@@ -53,3 +53,18 @@ class CanExecuteLeaseGenerationRule(BasePermission):
             'recouvrement.view_reglegenerationlease',
             'recouvrement.change_reglegenerationlease',
         ])
+
+
+class CanValidateUSSDPayment(BasePermission):
+    """Autorise la validation ou le rejet d'une preuve de paiement USSD."""
+
+    message = (
+        "Vous devez pouvoir consulter les preuves de paiement USSD et "
+        "avoir la permission de les valider pour effectuer cette action."
+    )
+
+    def has_permission(self, request, view):
+        return request.user.has_perms([
+            'recouvrement.view_preuvepaiementussd',
+            'recouvrement.can_validate_ussd_payment',
+        ])

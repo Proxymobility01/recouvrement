@@ -40,11 +40,14 @@ from recouvrement.admin import (
 )
 from recouvrement.models import (
     Agence,
+    CompteReceptionProprietaire,
     Contrat,
     Lease,
     Parametre,
     Paiement,
     Penalite,
+    PreuvePaiementUSSD,
+    Proprietaire,
     RegleGenerationLease,
     SessionPaiement,
     TypeContrat,
@@ -53,11 +56,13 @@ from recouvrement.api.v1.views import (
     AgenceViewSet,
     ContratViewSet,
     InitiationPaiementView,
+    InitiationPaiementUSSDView,
     LeaseViewSet,
     PaiementViewSet,
     PenaliteViewSet,
     RegleGenerationLeaseViewSet,
     SessionPaiementViewSet,
+    SoumissionPreuvePaiementUSSDView,
     WebhookView,
 )
 from recouvrement.api.v1.serializers import (
@@ -76,6 +81,7 @@ from recouvrement.services import (
     calculer_prochaine_occurrence,
     generer_leases_pour_regle,
 )
+from recouvrement.services_ussd import PaiementUSSDService
 
 
 def occurrence_aware(annee, mois, jour, heure, minute=0):
@@ -181,6 +187,670 @@ class RechercheAgenceTests(SimpleTestCase):
                     model_admin.search_fields,
                 )
                 self.assertIn('agence__code', model_admin.search_fields)
+
+
+class ProprietaireContratTests(TestCase):
+    compte_id = 91
+
+    def setUp(self):
+        self.chauffeur = CustomUser.objects.create(
+            keycloak_id='filgrace-owner-driver',
+            compte_id=self.compte_id,
+            nom_complet='Chauffeur Filgrace',
+            is_active=True,
+        )
+        self.type_parent = TypeContrat.objects.create(
+            compte_id=self.compte_id,
+            libelle='Moto Filgrace',
+            code='MOTO-FILGRACE',
+            est_principal=True,
+        )
+        self.type_enfant = TypeContrat.objects.create(
+            compte_id=self.compte_id,
+            libelle='Royal Care Filgrace',
+            code='CARE-FILGRACE',
+            est_principal=False,
+        )
+        self.proprietaire = Proprietaire.objects.create(
+            compte_id=self.compte_id,
+            nom_complet='  Étienne Propriétaire  ',
+        )
+        self.autre_proprietaire = Proprietaire.objects.create(
+            compte_id=self.compte_id,
+            nom_complet='Autre propriétaire',
+        )
+        self.proprietaire_autre_compte = Proprietaire.objects.create(
+            compte_id=92,
+            nom_complet='Propriétaire autre compte',
+        )
+
+    def _creer_contrat(
+        self,
+        *,
+        parent=None,
+        proprietaire=None,
+        type_contrat=None,
+    ):
+        return Contrat.objects.create(
+            compte_id=self.compte_id,
+            chauffeur=self.chauffeur,
+            type_contrat=type_contrat or (
+                self.type_enfant if parent else self.type_parent
+            ),
+            parent=parent,
+            proprietaire=proprietaire or self.proprietaire,
+            nom_complet='Contrat Filgrace',
+            montant_total=Decimal('100000.00'),
+            montant_restant=Decimal('100000.00'),
+            montant_par_paiement=Decimal('3500.00'),
+            montant_paye=Decimal('0.00'),
+            frequence=Contrat.JOURNALIER,
+            date_debut=date(2026, 9, 1),
+            date_fin=date(2026, 12, 31),
+            prochaine_echeance=occurrence_aware(2026, 9, 1, 8),
+            statut=Contrat.STATUT_ACTIF,
+        )
+
+    def test_proprietaire_et_compte_reception_sont_normalises(self):
+        compte_reception = CompteReceptionProprietaire.objects.create(
+            compte_id=self.compte_id,
+            proprietaire=self.proprietaire,
+            operateur=CompteReceptionProprietaire.OPERATEUR_ORANGE,
+            numero=' 690-16-96-94 ',
+        )
+
+        self.proprietaire.refresh_from_db()
+        self.assertEqual(
+            self.proprietaire.nom_complet,
+            'Étienne Propriétaire',
+        )
+        self.assertEqual(
+            self.proprietaire.nom_complet_search,
+            'etienne proprietaire',
+        )
+        self.assertEqual(compte_reception.numero, '237690169694')
+        self.assertEqual(
+            compte_reception.nom_titulaire,
+            'Étienne Propriétaire',
+        )
+        self.assertEqual(
+            compte_reception.nom_titulaire_search,
+            'etienne proprietaire',
+        )
+
+    def test_un_seul_compte_par_operateur_et_par_proprietaire(self):
+        CompteReceptionProprietaire.objects.create(
+            compte_id=self.compte_id,
+            proprietaire=self.proprietaire,
+            operateur=CompteReceptionProprietaire.OPERATEUR_MTN,
+            numero='677777770',
+        )
+
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                CompteReceptionProprietaire.objects.create(
+                    compte_id=self.compte_id,
+                    proprietaire=self.proprietaire,
+                    operateur=CompteReceptionProprietaire.OPERATEUR_MTN,
+                    numero='677777771',
+                )
+
+    def test_compte_reception_refuse_un_proprietaire_d_un_autre_compte(self):
+        with self.assertRaises(ValidationError):
+            CompteReceptionProprietaire.objects.create(
+                compte_id=self.compte_id,
+                proprietaire=self.proprietaire_autre_compte,
+                operateur=CompteReceptionProprietaire.OPERATEUR_ORANGE,
+                numero='690169694',
+            )
+
+    def test_compte_partenaire_du_proprietaire_est_immuable(self):
+        self.proprietaire.compte_id = 92
+
+        with self.assertRaises(ValidationError):
+            self.proprietaire.save(update_fields=['compte_id'])
+
+        self.proprietaire.refresh_from_db()
+        self.assertEqual(self.proprietaire.compte_id, self.compte_id)
+
+    def test_sous_contrat_herite_toujours_du_proprietaire(self):
+        parent = self._creer_contrat()
+        enfant = self._creer_contrat(
+            parent=parent,
+            proprietaire=self.autre_proprietaire,
+        )
+
+        self.assertEqual(enfant.proprietaire_id, self.proprietaire.id)
+
+        enfant.proprietaire = self.autre_proprietaire
+        enfant.save(update_fields=['proprietaire'])
+        enfant.refresh_from_db()
+        self.assertEqual(enfant.proprietaire_id, self.proprietaire.id)
+
+    def test_changement_parent_propage_le_proprietaire_sans_historique(self):
+        parent = self._creer_contrat()
+        enfant = self._creer_contrat(parent=parent)
+
+        parent.proprietaire = self.autre_proprietaire
+        parent.save(update_fields=['proprietaire'])
+        enfant.refresh_from_db()
+
+        self.assertEqual(
+            enfant.proprietaire_id,
+            self.autre_proprietaire.id,
+        )
+
+    def test_changement_proprietaire_bloque_avec_historique_enfant(self):
+        parent = self._creer_contrat()
+        enfant = self._creer_contrat(parent=parent)
+        Lease.objects.create(
+            compte_id=self.compte_id,
+            contrat=enfant,
+            date_echeance=occurrence_aware(2026, 9, 1, 8),
+            montant_attendu=Decimal('3500.00'),
+        )
+
+        parent.proprietaire = self.autre_proprietaire
+        with self.assertRaises(ValidationError):
+            parent.save(update_fields=['proprietaire'])
+
+        parent.refresh_from_db()
+        self.assertEqual(parent.proprietaire_id, self.proprietaire.id)
+
+    def test_contrat_refuse_proprietaire_d_un_autre_compte(self):
+        with self.assertRaises(ValidationError):
+            self._creer_contrat(
+                proprietaire=self.proprietaire_autre_compte,
+            )
+
+    def test_serializer_exige_proprietaire_sur_nouveau_parent(self):
+        request = SimpleNamespace(
+            user=self.chauffeur,
+            data={},
+        )
+        serializer = ContratSerializer(
+            data={
+                'chauffeur': self.chauffeur.id,
+                'type_contrat': self.type_parent.id,
+                'immatriculation': 'LT-001-FG',
+                'vin': 'FILGRACE000000001',
+                'montant_total': '100000.00',
+                'montant_par_paiement': '3500.00',
+                'frequence': Contrat.JOURNALIER,
+                'date_debut': '2026-09-01',
+                'date_fin': '2026-12-31',
+                'prochaine_echeance': '2026-09-01T08:00:00+01:00',
+            },
+            context={'request': request},
+        )
+
+        self.assertFalse(serializer.is_valid())
+        self.assertIn('proprietaire', serializer.errors)
+
+    def test_admin_interdit_modification_proprietaire_sous_contrat(self):
+        parent = self._creer_contrat()
+        enfant = self._creer_contrat(parent=parent)
+        contrat_admin = admin.site._registry[Contrat]
+
+        champs = contrat_admin.get_readonly_fields(
+            SimpleNamespace(user=self.chauffeur),
+            enfant,
+        )
+
+        self.assertIn('proprietaire', champs)
+
+
+class PaiementUSSDAssisteTests(TestCase):
+    compte_id = 93
+
+    def setUp(self):
+        self.utilisateur = CustomUser.objects.create(
+            keycloak_id='filgrace-ussd-user',
+            compte_id=self.compte_id,
+            nom_complet='Chauffeur paiement USSD',
+            is_active=True,
+            is_staff=True,
+            is_superuser=True,
+        )
+        self.deuxieme_chauffeur = CustomUser.objects.create(
+            keycloak_id='filgrace-ussd-driver-2',
+            compte_id=self.compte_id,
+            nom_complet='Deuxième chauffeur USSD',
+            is_active=True,
+        )
+        self.troisieme_chauffeur = CustomUser.objects.create(
+            keycloak_id='filgrace-ussd-driver-3',
+            compte_id=self.compte_id,
+            nom_complet='Troisième chauffeur USSD',
+            is_active=True,
+        )
+        self.type_contrat = TypeContrat.objects.create(
+            compte_id=self.compte_id,
+            libelle='Moto paiement USSD',
+            code='MOTO-USSD',
+            est_principal=True,
+        )
+        self.agence = Agence.objects.create(
+            compte_id=self.compte_id,
+            nom='Agence Filgrace',
+            code='FILGRACE',
+        )
+        self.proprietaire = Proprietaire.objects.create(
+            compte_id=self.compte_id,
+            nom_complet='Propriétaire principal',
+        )
+        self.autre_proprietaire = Proprietaire.objects.create(
+            compte_id=self.compte_id,
+            nom_complet='Autre propriétaire',
+        )
+        self.compte_orange = CompteReceptionProprietaire.objects.create(
+            compte_id=self.compte_id,
+            proprietaire=self.proprietaire,
+            operateur=CompteReceptionProprietaire.OPERATEUR_ORANGE,
+            numero='690169694',
+            nom_titulaire='Propriétaire principal',
+        )
+        self.autre_compte_orange = (
+            CompteReceptionProprietaire.objects.create(
+                compte_id=self.compte_id,
+                proprietaire=self.autre_proprietaire,
+                operateur=CompteReceptionProprietaire.OPERATEUR_ORANGE,
+                numero='690169695',
+                nom_titulaire='Autre propriétaire',
+            )
+        )
+        self.contrat = self._creer_contrat(
+            'Contrat USSD principal',
+            self.proprietaire,
+        )
+        self.contrat_meme_proprietaire = self._creer_contrat(
+            'Deuxième contrat du propriétaire',
+            self.proprietaire,
+            chauffeur=self.deuxieme_chauffeur,
+        )
+        self.contrat_autre_proprietaire = self._creer_contrat(
+            'Contrat autre propriétaire',
+            self.autre_proprietaire,
+            chauffeur=self.troisieme_chauffeur,
+        )
+        self.lease = self._creer_lease(
+            self.contrat,
+            Decimal('3500.00'),
+        )
+        self.lease_meme_proprietaire = self._creer_lease(
+            self.contrat_meme_proprietaire,
+            Decimal('1000.00'),
+        )
+        self.lease_autre_proprietaire = self._creer_lease(
+            self.contrat_autre_proprietaire,
+            Decimal('2500.00'),
+        )
+
+    def _creer_contrat(self, nom, proprietaire, chauffeur=None):
+        return Contrat.objects.create(
+            compte_id=self.compte_id,
+            agence=self.agence,
+            chauffeur=chauffeur or self.utilisateur,
+            enregistre_par=self.utilisateur,
+            type_contrat=self.type_contrat,
+            proprietaire=proprietaire,
+            nom_complet=nom,
+            montant_total=Decimal('200000.00'),
+            montant_restant=Decimal('200000.00'),
+            montant_par_paiement=Decimal('3500.00'),
+            montant_paye=Decimal('0.00'),
+            frequence=Contrat.JOURNALIER,
+            date_debut=date(2026, 9, 1),
+            date_fin=date(2027, 3, 31),
+            prochaine_echeance=occurrence_aware(2026, 9, 2, 8),
+            statut=Contrat.STATUT_ACTIF,
+        )
+
+    def _creer_lease(self, contrat, montant):
+        return Lease.objects.create(
+            compte_id=self.compte_id,
+            contrat=contrat,
+            date_echeance=occurrence_aware(2026, 9, 1, 8),
+            montant_attendu=montant,
+        )
+
+    def _initier(self, lignes, operateur='orange'):
+        request = APIRequestFactory().post(
+            '/api/v1/initier-paiement-ussd/',
+            {
+                'lignes': [
+                    {
+                        'lease_id': lease.id,
+                        'montant': str(montant),
+                    }
+                    for lease, montant in lignes
+                ],
+                'operateur': operateur,
+                'phone_number': '690458393',
+            },
+            format='json',
+        )
+        force_authenticate(request, user=self.utilisateur)
+        return InitiationPaiementUSSDView.as_view()(request)
+
+    def _soumettre(self, session, **changements):
+        payload = {
+            'sessionReference': session.reference,
+            'network': 'orange',
+            'rawText': (
+                'Transfert vers 690169694 réussi. '
+                'ID transaction: PP260908.TEST.'
+            ),
+            'amount': str(session.montant_total),
+            'senderName': 'CHAUFFEUR TEST',
+            'senderPhone': '690458393',
+            'recipientName': 'PROPRIETAIRE PRINCIPAL',
+            'recipientPhone': '690169694',
+            'reference': 'PP260908.TEST',
+            'timestamp': None,
+            'fee': '150.00',
+            'commission': '0.00',
+            'newBalance': '1000.00',
+            'capturedAtDevice': timezone.now().isoformat(),
+        }
+        payload.update(changements)
+        request = APIRequestFactory().post(
+            '/api/v1/soumettre-preuve-paiement-ussd/',
+            payload,
+            format='json',
+        )
+        force_authenticate(request, user=self.utilisateur)
+        return SoumissionPreuvePaiementUSSDView.as_view()(request)
+
+    def test_initiation_groupe_deux_contrats_du_meme_proprietaire(self):
+        response = self._initier([
+            (self.lease, Decimal('3500.00')),
+            (self.lease_meme_proprietaire, Decimal('1000.00')),
+        ])
+
+        self.assertEqual(response.status_code, 201)
+        session = SessionPaiement.objects.get(
+            reference=response.data['reference_interne'],
+        )
+        self.assertEqual(
+            session.canal,
+            SessionPaiement.CANAL_USSD_ASSISTE,
+        )
+        self.assertEqual(session.proprietaire_id, self.proprietaire.id)
+        self.assertEqual(
+            session.compte_reception_id,
+            self.compte_orange.id,
+        )
+        self.assertEqual(session.operateur, 'ORANGE')
+        self.assertEqual(session.numero_destinataire, '237690169694')
+        self.assertEqual(session.montant_total, Decimal('4500.00'))
+        self.assertEqual(session.lignes_paiement.count(), 2)
+        self.assertFalse(
+            session.lignes_paiement.exclude(
+                methode=Paiement.METHODE_USSD_ASSISTE,
+                statut=Paiement.STATUT_EN_ATTENTE,
+            ).exists()
+        )
+
+    def test_initiation_refuse_deux_proprietaires(self):
+        response = self._initier([
+            (self.lease, Decimal('3500.00')),
+            (self.lease_autre_proprietaire, Decimal('2500.00')),
+        ])
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn(
+            'propriétaires différents',
+            response.data['dev_message'],
+        )
+        self.assertFalse(SessionPaiement.objects.exists())
+
+    def test_initiation_refuse_operateur_non_configure(self):
+        response = self._initier([
+            (self.lease, Decimal('3500.00')),
+        ], operateur='mtn')
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('Aucun compte MTN actif', response.data['dev_message'])
+        self.assertFalse(SessionPaiement.objects.exists())
+
+    def test_un_second_paiement_ussd_du_meme_lease_est_refuse(self):
+        premiere_reponse = self._initier([
+            (self.lease, Decimal('3500.00')),
+        ])
+        seconde_reponse = self._initier([
+            (self.lease, Decimal('3500.00')),
+        ])
+
+        self.assertEqual(premiere_reponse.status_code, 201)
+        self.assertEqual(seconde_reponse.status_code, 400)
+        self.assertIn(
+            'déjà en cours',
+            seconde_reponse.data['dev_message'],
+        )
+        self.assertEqual(SessionPaiement.objects.count(), 1)
+
+    def test_soumission_met_en_verification_sans_payer_le_lease(self):
+        initiation = self._initier([
+            (self.lease, Decimal('3500.00')),
+        ])
+        session = SessionPaiement.objects.get(
+            reference=initiation.data['reference_interne'],
+        )
+
+        response = self._soumettre(session)
+
+        self.assertEqual(response.status_code, 201)
+        session.refresh_from_db()
+        self.lease.refresh_from_db()
+        paiement = session.lignes_paiement.get()
+        preuve = PreuvePaiementUSSD.objects.get(session=session)
+
+        self.assertEqual(
+            session.statut,
+            SessionPaiement.STATUT_EN_VERIFICATION,
+        )
+        self.assertEqual(
+            preuve.statut,
+            PreuvePaiementUSSD.STATUT_EN_VERIFICATION,
+        )
+        self.assertEqual(preuve.montant_transfere, Decimal('3500.00'))
+        self.assertEqual(preuve.frais_operateur, Decimal('150.00'))
+        self.assertEqual(self.lease.montant_paye, Decimal('0.00'))
+        self.assertEqual(self.lease.statut, Lease.STATUT_NON_PAYE)
+        self.assertEqual(paiement.statut, Paiement.STATUT_EN_ATTENTE)
+        self.assertTrue(
+            LeaseSerializer(self.lease).data[
+                'paiement_en_verification'
+            ]
+        )
+
+    def test_soumission_refuse_un_mauvais_destinataire(self):
+        initiation = self._initier([
+            (self.lease, Decimal('3500.00')),
+        ])
+        session = SessionPaiement.objects.get(
+            reference=initiation.data['reference_interne'],
+        )
+
+        response = self._soumettre(
+            session,
+            recipientPhone='690000000',
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('recipientPhone', response.data['dev_message'])
+        session.refresh_from_db()
+        self.assertEqual(session.statut, SessionPaiement.STATUT_EN_ATTENTE)
+        self.assertFalse(PreuvePaiementUSSD.objects.exists())
+
+    def test_reference_operateur_ne_peut_pas_etre_reutilisee(self):
+        initiation_1 = self._initier([
+            (self.lease, Decimal('3500.00')),
+        ])
+        session_1 = SessionPaiement.objects.get(
+            reference=initiation_1.data['reference_interne'],
+        )
+        self.assertEqual(self._soumettre(session_1).status_code, 201)
+
+        initiation_2 = self._initier([
+            (self.lease_meme_proprietaire, Decimal('1000.00')),
+        ])
+        session_2 = SessionPaiement.objects.get(
+            reference=initiation_2.data['reference_interne'],
+        )
+        response = self._soumettre(session_2)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('reference', response.data['dev_message'])
+        session_2.refresh_from_db()
+        self.assertEqual(session_2.statut, SessionPaiement.STATUT_EN_ATTENTE)
+
+    def test_validation_declenche_ventilation_et_ignore_les_frais(self):
+        initiation = self._initier([
+            (self.lease, Decimal('3500.00')),
+        ])
+        session = SessionPaiement.objects.get(
+            reference=initiation.data['reference_interne'],
+        )
+        self.assertEqual(self._soumettre(session).status_code, 201)
+        preuve = PreuvePaiementUSSD.objects.get(session=session)
+
+        with self.captureOnCommitCallbacks(execute=False) as callbacks:
+            preuve, modifiee = PaiementUSSDService.valider_preuve(
+                preuve_id=preuve.id,
+                agent=self.utilisateur,
+            )
+
+        self.assertTrue(modifiee)
+        self.assertEqual(len(callbacks), 1)
+        preuve.refresh_from_db()
+        session.refresh_from_db()
+        self.assertEqual(
+            preuve.statut,
+            PreuvePaiementUSSD.STATUT_VALIDEE,
+        )
+        self.assertEqual(session.statut, SessionPaiement.STATUT_VALIDE)
+        self.assertEqual(preuve.verifie_par_id, self.utilisateur.id)
+
+        with patch('core.tasks.notifier_utilisateur'):
+            paiement_task(session.id, 'SUCCESS')
+
+        self.lease.refresh_from_db()
+        self.contrat.refresh_from_db()
+        paiement = session.lignes_paiement.get()
+        self.assertEqual(paiement.statut, Paiement.STATUT_VALIDE)
+        self.assertEqual(paiement.montant, Decimal('3500.00'))
+        self.assertEqual(self.lease.montant_paye, Decimal('3500.00'))
+        self.assertEqual(self.lease.statut, Lease.STATUT_PAYE)
+        self.assertEqual(self.contrat.montant_paye, Decimal('3500.00'))
+        self.assertEqual(
+            self.contrat.montant_restant,
+            Decimal('196500.00'),
+        )
+        self.assertEqual(preuve.frais_operateur, Decimal('150.00'))
+
+        _, modifiee_deuxieme_fois = (
+            PaiementUSSDService.valider_preuve(
+                preuve_id=preuve.id,
+                agent=self.utilisateur,
+            )
+        )
+        self.assertFalse(modifiee_deuxieme_fois)
+
+    def test_rejet_libere_le_lease_sans_modifier_ses_montants(self):
+        initiation = self._initier([
+            (self.lease, Decimal('3500.00')),
+        ])
+        session = SessionPaiement.objects.get(
+            reference=initiation.data['reference_interne'],
+        )
+        self.assertEqual(self._soumettre(session).status_code, 201)
+        preuve = PreuvePaiementUSSD.objects.get(session=session)
+
+        preuve, modifiee = PaiementUSSDService.rejeter_preuve(
+            preuve_id=preuve.id,
+            agent=self.utilisateur,
+            motif='Transaction absente du relevé du propriétaire.',
+        )
+
+        self.assertTrue(modifiee)
+        preuve.refresh_from_db()
+        session.refresh_from_db()
+        self.lease.refresh_from_db()
+        paiement = session.lignes_paiement.get()
+        self.assertEqual(
+            preuve.statut,
+            PreuvePaiementUSSD.STATUT_REJETEE,
+        )
+        self.assertEqual(
+            preuve.motif_rejet,
+            'Transaction absente du relevé du propriétaire.',
+        )
+        self.assertEqual(session.statut, SessionPaiement.STATUT_REJETE)
+        self.assertEqual(paiement.statut, Paiement.STATUT_ECHEC)
+        self.assertEqual(self.lease.montant_paye, Decimal('0.00'))
+        self.assertEqual(self.lease.statut, Lease.STATUT_NON_PAYE)
+
+        nouvelle_initiation = self._initier([
+            (self.lease, Decimal('3500.00')),
+        ])
+        self.assertEqual(nouvelle_initiation.status_code, 201)
+
+    def test_validation_ussd_genere_le_lease_suivant(self):
+        regle = RegleGenerationLease.objects.create(
+            compte_id=self.compte_id,
+            nom='Règle USSD quotidienne',
+            frequence=Schedule.DAILY,
+            debut=occurrence_aware(2026, 9, 1, 8),
+            actif=True,
+        )
+        self.contrat.regle_generation = regle
+        self.contrat.save(update_fields=['regle_generation'])
+
+        initiation = self._initier([
+            (self.lease, Decimal('3500.00')),
+        ])
+        session = SessionPaiement.objects.get(
+            reference=initiation.data['reference_interne'],
+        )
+        self.assertEqual(self._soumettre(session).status_code, 201)
+        preuve = PreuvePaiementUSSD.objects.get(session=session)
+
+        with self.captureOnCommitCallbacks(execute=False):
+            PaiementUSSDService.valider_preuve(
+                preuve_id=preuve.id,
+                agent=self.utilisateur,
+            )
+        with patch('core.tasks.notifier_utilisateur'):
+            paiement_task(session.id, 'SUCCESS')
+
+        lease_suivant = Lease.objects.get(
+            contrat=self.contrat,
+            date_echeance=occurrence_aware(2026, 9, 2, 8),
+        )
+        self.assertEqual(lease_suivant.statut, Lease.STATUT_NON_PAYE)
+        self.contrat.refresh_from_db()
+        self.assertEqual(
+            self.contrat.prochaine_echeance,
+            occurrence_aware(2026, 9, 3, 8),
+        )
+
+    def test_admin_preuve_est_en_lecture_seule_avec_actions_manuelles(self):
+        preuve_admin = admin.site._registry[PreuvePaiementUSSD]
+
+        self.assertFalse(
+            preuve_admin.has_add_permission(
+                SimpleNamespace(user=self.utilisateur),
+            )
+        )
+        self.assertFalse(
+            preuve_admin.has_delete_permission(
+                SimpleNamespace(user=self.utilisateur),
+            )
+        )
+        self.assertIn('valider_preuves_ussd', preuve_admin.actions)
+        self.assertIn('rejeter_preuves_ussd', preuve_admin.actions)
 
 
 class CalculProchaineOccurrenceTests(SimpleTestCase):
@@ -975,7 +1645,7 @@ class AdministrationIdCompteTests(SimpleTestCase):
             )
         ]
 
-        self.assertEqual(len(admins_concernes), 13)
+        self.assertEqual(len(admins_concernes), 16)
         for model_admin in admins_concernes:
             list_display = tuple(model_admin.list_display)
             self.assertEqual(

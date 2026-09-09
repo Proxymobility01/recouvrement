@@ -90,7 +90,10 @@ def paiement_task(session_id, statut_gateway):
                             contrat.save()
 
                             if (
-                                paiement.methode == Paiement.METHODE_MOBILE_MONEY
+                                paiement.methode in (
+                                    Paiement.METHODE_MOBILE_MONEY,
+                                    Paiement.METHODE_USSD_ASSISTE,
+                                )
                                 and ancien_statut_lease != Lease.STATUT_PAYE
                                 and lease.statut == Lease.STATUT_PAYE
                             ):

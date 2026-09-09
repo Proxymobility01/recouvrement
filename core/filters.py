@@ -1,7 +1,8 @@
 import django_filters
 from django_filters import rest_framework as filters
 
-from recouvrement.models import Lease, Contrat, Paiement, ReglePenalite, Penalite, SessionPaiement
+from recouvrement.models import Lease, Contrat, Paiement, ReglePenalite, Penalite, SessionPaiement, \
+    PreuvePaiementUSSD, CompteReceptionProprietaire
 
 
 class CharInFilter(django_filters.BaseInFilter, django_filters.CharFilter):
@@ -17,6 +18,9 @@ class LeaseFilter(filters.FilterSet):
 
     agence_id = filters.NumberFilter(field_name="agence_id")
     agence_id__in = NumberInFilter(field_name='agence_id', lookup_expr='in')
+    proprietaire_id = filters.NumberFilter(
+        field_name='contrat__proprietaire_id'
+    )
 
     # ==========================================
     # FILTRES SUR LA DATE D'ÉCHÉANCE (DateField)
@@ -47,6 +51,7 @@ class ContratFilter(filters.FilterSet):
 
     agence_id = filters.NumberFilter(field_name="agence_id")
     agence_id__in = NumberInFilter(field_name='agence_id', lookup_expr='in')
+    proprietaire_id = filters.NumberFilter(field_name='proprietaire_id')
 
     # ==========================================
     # 2. RANGES DE DATES (_start et _end)
@@ -150,6 +155,9 @@ class SessionPaiementFilter(filters.FilterSet):
 
     agence_id = filters.NumberFilter(field_name="agence_id")
     agence_id__in = NumberInFilter(field_name='agence_id', lookup_expr='in')
+    proprietaire_id = filters.NumberFilter(field_name='proprietaire_id')
+    canal__in = CharInFilter(field_name='canal', lookup_expr='in')
+    operateur__in = CharInFilter(field_name='operateur', lookup_expr='in')
 
 
     date_validation_start = filters.DateFilter(field_name="date_validation__date", lookup_expr='gte')
@@ -162,6 +170,8 @@ class SessionPaiementFilter(filters.FilterSet):
         model = SessionPaiement
         fields = [
             'statut',
+            'canal',
+            'operateur',
             'reference',
             'gateway_reference',
             'telephone',
@@ -226,4 +236,50 @@ class PenaliteFilter(filters.FilterSet):
         model = Penalite
         fields = [
             'statut',
+        ]
+
+
+class CompteReceptionProprietaireFilter(filters.FilterSet):
+    # NumberFilter explicite : un ModelChoiceFilter auto-généré depuis le
+    # FK 'proprietaire' validerait contre Proprietaire.objects.all() (tous
+    # comptes confondus), ce qui permettrait de deviner par la différence
+    # 400/200 qu'un identifiant existe chez un autre partenaire.
+    proprietaire_id = filters.NumberFilter(field_name='proprietaire_id')
+
+    class Meta:
+        model = CompteReceptionProprietaire
+        fields = [
+            'operateur',
+            'actif',
+        ]
+
+
+class PreuvePaiementUSSDFilter(filters.FilterSet):
+    # ==========================================
+    # 1. FILTRES MULTIPLES (IN)
+    # ==========================================
+    statut__in = CharInFilter(field_name='statut', lookup_expr='in')
+    operateur__in = CharInFilter(field_name='operateur', lookup_expr='in')
+
+    session_reference = filters.CharFilter(
+        field_name='session__reference', lookup_expr='icontains'
+    )
+    proprietaire_id = filters.NumberFilter(
+        field_name='session__proprietaire_id'
+    )
+
+    # ==========================================
+    # 2. RANGES DE DATES
+    # ==========================================
+    created_at_start = filters.DateFilter(field_name="created_at__date", lookup_expr='gte')
+    created_at_end = filters.DateFilter(field_name="created_at__date", lookup_expr='lte')
+
+    verifie_le_start = filters.DateFilter(field_name="verifie_le__date", lookup_expr='gte')
+    verifie_le_end = filters.DateFilter(field_name="verifie_le__date", lookup_expr='lte')
+
+    class Meta:
+        model = PreuvePaiementUSSD
+        fields = [
+            'statut',
+            'operateur',
         ]
