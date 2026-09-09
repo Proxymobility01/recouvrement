@@ -533,7 +533,11 @@ class ContratSerializer(
 
     def get_fields(self):
         fields = super().get_fields()
-        if self.instance is not None and self.instance.parent_id is not None:
+        # Sur une liste paginée, DRF instancie ce serializer avec many=True :
+        # self.instance reste alors la page entière (une list), pas un
+        # Contrat unique. isinstance() évite le crash tout en gardant le
+        # comportement voulu sur un objet unique (détail/création/mise à jour).
+        if isinstance(self.instance, Contrat) and self.instance.parent_id is not None:
             fields['proprietaire'].read_only = True
         return fields
 
