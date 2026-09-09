@@ -1,6 +1,7 @@
 import logging
 from collections import defaultdict
 from datetime import date, datetime, time, timedelta
+from decimal import Decimal
 from math import ceil
 
 import requests
@@ -203,6 +204,32 @@ def _normaliser_jours_repos(jours_repos):
     return set() if len(jours) >= 7 else jours
 
 
+def _montant_restant_non_couvert_par_les_leases(contrat):
+    """Retourne le solde qui peut encore être porté par de nouveaux leases.
+
+    ``Contrat.montant_restant`` diminue au moment des paiements, tandis que les
+    leases existants matérialisent déjà tout ou partie de ce solde. Les leases
+    annulés sont exclus afin que leur montant puisse être replanifié sur une
+    occurrence future.
+    """
+    from .models import Lease
+
+    zero = Decimal('0.00')
+    montant_restant = max(contrat.montant_restant or zero, zero)
+    reste_deja_couvert = sum(
+        (
+            max((montant_attendu or zero) - (montant_paye or zero), zero)
+            for montant_attendu, montant_paye in (
+                Lease.objects.filter(contrat_id=contrat.id)
+                .exclude(statut=Lease.STATUT_ANNULE)
+                .values_list('montant_attendu', 'montant_paye')
+            )
+        ),
+        zero,
+    )
+    return max(montant_restant - reste_deja_couvert, zero)
+
+
 def generer_leases_pour_regle(regle_id, jusqu_a=None):
     """
     Génère, de façon idempotente, toutes les occurrences exigibles d'une règle.
@@ -246,6 +273,7 @@ def generer_leases_pour_regle(regle_id, jusqu_a=None):
             compte_id=regle.compte_id,
             regle_generation_id=regle.id,
             statut=Contrat.STATUT_ACTIF,
+            montant_restant__gt=0,
             prochaine_echeance__isnull=False,
             prochaine_echeance__lte=limite,
         ).values_list('id', flat=True)
@@ -270,11 +298,16 @@ def generer_leases_pour_regle(regle_id, jusqu_a=None):
                         compte_id=regle.compte_id,
                         regle_generation_id=regle.id,
                         statut=Contrat.STATUT_ACTIF,
+                        montant_restant__gt=0,
                     )
                 )
 
                 if contrat.prochaine_echeance is None:
                     continue
+
+                montant_non_couvert = (
+                    _montant_restant_non_couvert_par_les_leases(contrat)
+                )
 
                 # Un autre worker ou la commande a pu faire avancer le curseur
                 # pendant que ce worker attendait le verrou. Le test sur la
@@ -303,14 +336,6 @@ def generer_leases_pour_regle(regle_id, jusqu_a=None):
                         timezone.get_current_timezone(),
                     )
 
-                    if (
-                        contrat.date_fin
-                        and occurrence_locale.date() > contrat.date_fin
-                    ):
-                        contrat.prochaine_echeance = None
-                        compteurs_contrat['contrats_termines'] = 1
-                        break
-
                     occurrence_suivante = calculer_prochaine_occurrence(
                         regle,
                         occurrence,
@@ -318,16 +343,30 @@ def generer_leases_pour_regle(regle_id, jusqu_a=None):
 
                     if occurrence_locale.weekday() in jours_repos:
                         compteurs_contrat['occurrences_repos_ignorees'] += 1
-                    else:
+                    elif montant_non_couvert > 0:
+                        montant_attendu = min(
+                            contrat.montant_par_paiement,
+                            montant_non_couvert,
+                        )
                         _, created = Lease.objects.get_or_create(
                             contrat=contrat,
                             date_echeance=occurrence,
                             defaults={
                                 'compte_id': contrat.compte_id,
-                                'montant_attendu': contrat.montant_par_paiement,
+                                'montant_attendu': montant_attendu,
                                 'statut': Lease.STATUT_NON_PAYE,
                             },
                         )
+                        if created:
+                            montant_non_couvert -= montant_attendu
+                        else:
+                            # Le lease a pu être créé en dehors de ce moteur.
+                            # On recalcule le plafond avant l'occurrence suivante.
+                            montant_non_couvert = (
+                                _montant_restant_non_couvert_par_les_leases(
+                                    contrat
+                                )
+                            )
                         compteur = (
                             'leases_crees'
                             if created
@@ -452,6 +491,12 @@ def assurer_lease_suivant_du_lease(lease_source_id):
                 'lease_cree': False,
             }
 
+        montant_non_couvert = (
+            _montant_restant_non_couvert_par_les_leases(contrat)
+        )
+        if montant_non_couvert <= 0:
+            return ignorer('SOLDE_DEJA_COUVERT_PAR_LES_LEASES')
+
         occurrence = normaliser_curseur_generation(
             regle,
             contrat.prochaine_echeance,
@@ -462,16 +507,6 @@ def assurer_lease_suivant_du_lease(lease_source_id):
                 occurrence,
                 timezone.get_current_timezone(),
             )
-
-            if (
-                contrat.date_fin
-                and occurrence_locale.date() > contrat.date_fin
-            ):
-                contrat.prochaine_echeance = None
-                contrat.save(
-                    update_fields=['prochaine_echeance', 'updated_at']
-                )
-                return ignorer('DATE_FIN_DEPASSEE')
 
             lease_a_occurrence = Lease.objects.filter(
                 contrat_id=contrat.id,
@@ -501,7 +536,10 @@ def assurer_lease_suivant_du_lease(lease_source_id):
             date_echeance=occurrence,
             defaults={
                 'compte_id': contrat.compte_id,
-                'montant_attendu': contrat.montant_par_paiement,
+                'montant_attendu': min(
+                    contrat.montant_par_paiement,
+                    montant_non_couvert,
+                ),
                 'statut': Lease.STATUT_NON_PAYE,
             },
         )

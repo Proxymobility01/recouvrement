@@ -1174,6 +1174,193 @@ class GenerationLeasesTests(TestCase):
             ],
         )
 
+    def test_generation_continue_apres_date_fin_si_solde_non_couvert(self):
+        self.regle.frequence = Schedule.DAILY
+        self.regle.cron_expression = None
+        self.regle.debut = occurrence_aware(2026, 8, 2, 8)
+        self.regle.save()
+        self.contrat.date_fin = date(2026, 8, 1)
+        self.contrat.prochaine_echeance = occurrence_aware(2026, 8, 2, 8)
+        self.contrat.save(
+            update_fields=['date_fin', 'prochaine_echeance']
+        )
+
+        resultat = generer_leases_pour_regle(
+            self.regle.id,
+            occurrence_aware(2026, 8, 2, 8),
+        )
+
+        self.assertEqual(resultat['leases_crees'], 1)
+        lease = Lease.objects.get(contrat=self.contrat)
+        self.assertEqual(lease.date_echeance, occurrence_aware(2026, 8, 2, 8))
+        self.assertEqual(lease.montant_attendu, Decimal('5000.00'))
+        self.contrat.refresh_from_db()
+        self.assertEqual(
+            self.contrat.prochaine_echeance,
+            occurrence_aware(2026, 8, 3, 8),
+        )
+
+    def test_generation_ne_depasse_pas_un_solde_deja_couvert(self):
+        self.regle.frequence = Schedule.DAILY
+        self.regle.cron_expression = None
+        self.regle.debut = occurrence_aware(2026, 8, 1, 8)
+        self.regle.save()
+        self.contrat.montant_total = Decimal('5000.00')
+        self.contrat.montant_restant = Decimal('5000.00')
+        self.contrat.montant_par_paiement = Decimal('5000.00')
+        self.contrat.date_fin = date(2026, 8, 1)
+        self.contrat.prochaine_echeance = occurrence_aware(2026, 8, 2, 8)
+        self.contrat.save(
+            update_fields=[
+                'montant_total',
+                'montant_restant',
+                'montant_par_paiement',
+                'date_fin',
+                'prochaine_echeance',
+            ]
+        )
+        lease_existant = Lease.objects.create(
+            compte_id=self.compte_id,
+            contrat=self.contrat,
+            date_echeance=occurrence_aware(2026, 8, 1, 8),
+            montant_attendu=Decimal('5000.00'),
+        )
+
+        resultat = generer_leases_pour_regle(
+            self.regle.id,
+            occurrence_aware(2026, 8, 2, 8),
+        )
+
+        self.assertEqual(resultat['leases_crees'], 0)
+        self.assertEqual(
+            list(Lease.objects.filter(contrat=self.contrat)),
+            [lease_existant],
+        )
+        self.contrat.refresh_from_db()
+        self.assertEqual(
+            self.contrat.prochaine_echeance,
+            occurrence_aware(2026, 8, 3, 8),
+        )
+
+    def test_generation_reduit_le_dernier_lease_au_solde_non_couvert(self):
+        self.regle.frequence = Schedule.DAILY
+        self.regle.cron_expression = None
+        self.regle.debut = occurrence_aware(2026, 8, 1, 8)
+        self.regle.save()
+        self.contrat.montant_total = Decimal('5000.00')
+        self.contrat.montant_restant = Decimal('4000.00')
+        self.contrat.montant_par_paiement = Decimal('3500.00')
+        self.contrat.date_fin = date(2026, 8, 1)
+        self.contrat.prochaine_echeance = occurrence_aware(2026, 8, 2, 8)
+        self.contrat.save(
+            update_fields=[
+                'montant_total',
+                'montant_restant',
+                'montant_par_paiement',
+                'date_fin',
+                'prochaine_echeance',
+            ]
+        )
+        Lease.objects.create(
+            compte_id=self.compte_id,
+            contrat=self.contrat,
+            date_echeance=occurrence_aware(2026, 8, 1, 8),
+            montant_attendu=Decimal('3500.00'),
+            montant_paye=Decimal('1000.00'),
+            statut=Lease.STATUT_PARTIEL,
+        )
+
+        resultat = generer_leases_pour_regle(
+            self.regle.id,
+            occurrence_aware(2026, 8, 2, 8),
+        )
+
+        self.assertEqual(resultat['leases_crees'], 1)
+        nouveau_lease = Lease.objects.get(
+            contrat=self.contrat,
+            date_echeance=occurrence_aware(2026, 8, 2, 8),
+        )
+        self.assertEqual(nouveau_lease.montant_attendu, Decimal('1500.00'))
+
+    def test_generation_apres_date_fin_respecte_un_jour_de_repos(self):
+        self.regle.frequence = Schedule.DAILY
+        self.regle.cron_expression = None
+        self.regle.debut = occurrence_aware(2026, 8, 3, 8)
+        self.regle.save()
+        Parametre.objects.create(
+            compte_id=self.compte_id,
+            jours_repos=[0],
+        )
+        self.contrat.date_fin = date(2026, 8, 2)
+        self.contrat.prochaine_echeance = occurrence_aware(2026, 8, 3, 8)
+        self.contrat.save(
+            update_fields=['date_fin', 'prochaine_echeance']
+        )
+
+        resultat = generer_leases_pour_regle(
+            self.regle.id,
+            occurrence_aware(2026, 8, 4, 8),
+        )
+
+        self.assertEqual(resultat['occurrences_repos_ignorees'], 1)
+        self.assertEqual(resultat['leases_crees'], 1)
+        self.assertTrue(
+            Lease.objects.filter(
+                contrat=self.contrat,
+                date_echeance=occurrence_aware(2026, 8, 4, 8),
+            ).exists()
+        )
+        self.contrat.refresh_from_db()
+        self.assertEqual(
+            self.contrat.prochaine_echeance,
+            occurrence_aware(2026, 8, 5, 8),
+        )
+
+    def test_paiement_genere_un_lease_reduit_apres_date_fin(self):
+        self.regle.frequence = Schedule.DAILY
+        self.regle.cron_expression = None
+        self.regle.debut = occurrence_aware(2026, 8, 1, 8)
+        self.regle.save()
+        self.contrat.montant_total = Decimal('7500.00')
+        self.contrat.montant_paye = Decimal('5000.00')
+        self.contrat.montant_restant = Decimal('2500.00')
+        self.contrat.montant_par_paiement = Decimal('5000.00')
+        self.contrat.date_fin = date(2026, 8, 1)
+        self.contrat.prochaine_echeance = occurrence_aware(2026, 8, 2, 8)
+        self.contrat.save(
+            update_fields=[
+                'montant_total',
+                'montant_paye',
+                'montant_restant',
+                'montant_par_paiement',
+                'date_fin',
+                'prochaine_echeance',
+            ]
+        )
+        lease_source = Lease.objects.create(
+            compte_id=self.compte_id,
+            contrat=self.contrat,
+            date_echeance=occurrence_aware(2026, 8, 1, 8),
+            montant_attendu=Decimal('5000.00'),
+            montant_paye=Decimal('5000.00'),
+            statut=Lease.STATUT_PAYE,
+        )
+
+        resultat = assurer_lease_suivant_du_lease(lease_source.id)
+
+        self.assertEqual(resultat['statut'], 'CREE')
+        lease_suivant = Lease.objects.get(pk=resultat['lease_id'])
+        self.assertEqual(
+            lease_suivant.date_echeance,
+            occurrence_aware(2026, 8, 2, 8),
+        )
+        self.assertEqual(lease_suivant.montant_attendu, Decimal('2500.00'))
+        self.contrat.refresh_from_db()
+        self.assertEqual(
+            self.contrat.prochaine_echeance,
+            occurrence_aware(2026, 8, 3, 8),
+        )
+
     def test_paiement_ne_genere_pas_si_un_lease_posterieur_existe(self):
         lease_source = Lease.objects.create(
             compte_id=self.compte_id,
