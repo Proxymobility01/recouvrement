@@ -1,0 +1,44 @@
+{% extends 'frontend/base.html' %}
+{% block titre %}Types de contrat{% endblock %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h1 class="h3 mb-0">Types de contrat</h1>
+  {% if perms.recouvrement.add_typecontrat %}
+    <button type="button" class="btn btn-primary" data-modal-url="{% url 'frontend:types-contrat-creer' %}">Nouveau type</button>
+  {% endif %}
+</div>
+
+<form method="get" class="row g-2 mb-3">
+  <div class="col-auto">
+    <input type="text" name="q" value="{{ recherche }}" class="form-control" placeholder="Libellé, code...">
+  </div>
+  <div class="col-auto"><button class="btn btn-outline-secondary" type="submit">Filtrer</button></div>
+</form>
+
+<table class="table table-striped table-hover bg-white">
+  <thead><tr><th>Libellé</th><th>Code</th><th>Catégorie</th><th></th></tr></thead>
+  <tbody>
+    {% for type_contrat in page_obj %}
+    <tr>
+      <td>{{ type_contrat.libelle }}</td>
+      <td>{{ type_contrat.code }}</td>
+      <td>
+        {% if type_contrat.est_principal %}
+          <span class="badge bg-primary">Principal</span>
+        {% else %}
+          <span class="badge bg-secondary">Accessoire</span>
+        {% endif %}
+      </td>
+      <td>
+        {% if peut_modifier %}
+          <button type="button" class="btn btn-sm btn-outline-primary" data-modal-url="{% url 'frontend:types-contrat-modifier' type_contrat.pk %}">Modifier</button>
+        {% endif %}
+      </td>
+    </tr>
+    {% empty %}
+    <tr><td colspan="4" class="text-center text-muted">Aucun type de contrat.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% include 'frontend/_pagination.html' %}
+{% endblock %}

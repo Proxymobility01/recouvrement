@@ -1,0 +1,53 @@
+{% extends 'frontend/base.html' %}
+{% block titre %}Contrats{% endblock %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h1 class="h3 mb-0">Contrats</h1>
+  {% if perms.recouvrement.add_contrat %}
+    <button type="button" class="btn btn-primary" data-modal-url="{% url 'frontend:contrats-creer' %}">Nouveau contrat</button>
+  {% endif %}
+</div>
+
+<form method="get" class="row g-2 mb-3">
+  <div class="col-auto">
+    <input type="text" name="q" value="{{ recherche }}" class="form-control" placeholder="Référence, VIN, immatriculation, chauffeur...">
+  </div>
+  <div class="col-auto">
+    <select name="statut" class="form-select">
+      <option value="">Tous les statuts</option>
+      {% for code, libelle in statuts %}
+        <option value="{{ code }}" {% if code == statut %}selected{% endif %}>{{ libelle }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="col-auto">
+    <button class="btn btn-outline-secondary" type="submit">Filtrer</button>
+  </div>
+</form>
+
+<table class="table table-striped table-hover bg-white">
+  <thead>
+    <tr>
+      <th>Référence</th><th>Chauffeur</th><th>Type</th><th>Statut</th>
+      <th>Montant restant</th><th>Prochaine échéance</th><th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for contrat in page_obj %}
+    <tr>
+      <td><a href="{% url 'frontend:contrats-detail' contrat.pk %}">{{ contrat.reference }}</a></td>
+      <td>{{ contrat.chauffeur.nom_complet }}</td>
+      <td>{{ contrat.type_contrat.libelle|default:"—" }}</td>
+      <td><span class="badge bg-secondary">{{ contrat.get_statut_display }}</span></td>
+      <td>{{ contrat.montant_restant }} F</td>
+      <td>{{ contrat.prochaine_echeance|date:"d/m/Y H:i"|default:"—" }}</td>
+      <td><a href="{% url 'frontend:contrats-detail' contrat.pk %}" class="btn btn-sm btn-outline-primary">Voir</a></td>
+    </tr>
+    {% empty %}
+    <tr><td colspan="7" class="text-center text-muted">Aucun contrat.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+{% include 'frontend/_pagination.html' %}
+{% endblock %}

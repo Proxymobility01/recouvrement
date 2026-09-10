@@ -1,0 +1,69 @@
+<div class="modal-header">
+  <h5 class="modal-title">Ajouter un sous-contrat à {{ contrat_parent.reference }}</h5>
+  <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fermer"></button>
+</div>
+<form method="post" action="{% url 'frontend:contrats-sous-contrat' contrat_parent.pk %}">
+  {% csrf_token %}
+  <div class="modal-body">
+    <div class="row g-3">
+      <div class="col-md-6">
+        <label class="form-label">Type de contrat</label>
+        <select name="type_contrat" class="form-select" required>
+          <option value="">— Sélectionner —</option>
+          {% for t in options.types_contrat %}
+            <option value="{{ t.pk }}">{{ t.libelle }}</option>
+          {% endfor %}
+        </select>
+        {% if erreurs.type_contrat %}<div class="text-danger small">{{ erreurs.type_contrat.0 }}</div>{% endif %}
+      </div>
+      <div class="col-md-6">
+        <label class="form-label">Fréquence</label>
+        <select name="frequence" class="form-select" required>
+          {% for code, libelle in frequences %}
+            <option value="{{ code }}">{{ libelle }}</option>
+          {% endfor %}
+        </select>
+        {% if erreurs.frequence %}<div class="text-danger small">{{ erreurs.frequence.0 }}</div>{% endif %}
+      </div>
+      <div class="col-md-4">
+        <label class="form-label">Montant total (F)</label>
+        <input type="number" step="0.01" name="montant_total" class="form-control" required>
+        {% if erreurs.montant_total %}<div class="text-danger small">{{ erreurs.montant_total.0 }}</div>{% endif %}
+      </div>
+      <div class="col-md-4">
+        <label class="form-label">Montant par échéance (F)</label>
+        <input type="number" step="0.01" name="montant_par_paiement" class="form-control" required>
+        {% if erreurs.montant_par_paiement %}<div class="text-danger small">{{ erreurs.montant_par_paiement.0 }}</div>{% endif %}
+      </div>
+      <div class="col-md-4">
+        <label class="form-label">Avance déjà payée (F)</label>
+        <input type="number" step="0.01" name="montant_paye" class="form-control" value="0">
+      </div>
+      <div class="col-md-4">
+        <label class="form-label">Date de début</label>
+        <input type="date" name="date_debut" class="form-control" required>
+        {% if erreurs.date_debut %}<div class="text-danger small">{{ erreurs.date_debut.0 }}</div>{% endif %}
+      </div>
+      <div class="col-md-4">
+        <label class="form-label">Date de fin</label>
+        <input type="date" name="date_fin" class="form-control" required>
+        {% if erreurs.date_fin %}<div class="text-danger small">{{ erreurs.date_fin.0 }}</div>{% endif %}
+      </div>
+      <div class="col-md-4">
+        <label class="form-label">Prochaine échéance</label>
+        <input type="datetime-local" name="prochaine_echeance" class="form-control" required>
+        {% if erreurs.prochaine_echeance %}<div class="text-danger small">{{ erreurs.prochaine_echeance.0 }}</div>{% endif %}
+      </div>
+
+      {% include 'frontend/contrats/_champs_specificites.html' %}
+    </div>
+
+    {% if erreurs.non_field_errors %}
+      <div class="alert alert-danger mt-3 mb-0">{{ erreurs.non_field_errors.0 }}</div>
+    {% endif %}
+  </div>
+  <div class="modal-footer">
+    <button type="button" class="btn btn-link" data-bs-dismiss="modal">Annuler</button>
+    <button type="submit" class="btn btn-primary">Ajouter</button>
+  </div>
+</form>

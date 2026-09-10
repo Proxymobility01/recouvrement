@@ -1,0 +1,43 @@
+{% extends 'frontend/base.html' %}
+{% block titre %}Échéances{% endblock %}
+{% block content %}
+<h1 class="h3 mb-3">Échéances</h1>
+
+<form method="get" class="row g-2 mb-3">
+  <div class="col-auto">
+    <input type="text" name="q" value="{{ recherche }}" class="form-control" placeholder="Chauffeur, référence...">
+  </div>
+  <div class="col-auto">
+    <select name="statut" class="form-select">
+      <option value="">Tous les statuts</option>
+      {% for code, libelle in statuts %}
+        <option value="{{ code }}" {% if code == statut %}selected{% endif %}>{{ libelle }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="col-auto"><button class="btn btn-outline-secondary" type="submit">Filtrer</button></div>
+</form>
+
+<table class="table table-striped bg-white">
+  <thead><tr><th>Date</th><th>Contrat</th><th>Chauffeur</th><th>Montant</th><th>Statut</th><th></th></tr></thead>
+  <tbody>
+    {% for lease in page_obj %}
+    <tr>
+      <td>{{ lease.date_echeance|date:"d/m/Y" }}</td>
+      <td><a href="{% url 'frontend:contrats-detail' lease.contrat_id %}">{{ lease.contrat.reference }}</a></td>
+      <td>{{ lease.contrat.chauffeur.nom_complet }}</td>
+      <td>{{ lease.montant_paye }} / {{ lease.montant_attendu }} F</td>
+      <td>{{ lease.get_statut_display }}</td>
+      <td>
+        {% if perms.recouvrement.add_paiement and lease.statut != 'PAYE' and lease.statut != 'ANNULE' %}
+          <button type="button" class="btn btn-sm btn-outline-success" data-modal-url="{% url 'frontend:paiements-creer' %}?lease={{ lease.pk }}">Encaisser</button>
+        {% endif %}
+      </td>
+    </tr>
+    {% empty %}
+    <tr><td colspan="6" class="text-muted text-center">Aucune échéance.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% include 'frontend/_pagination.html' %}
+{% endblock %}

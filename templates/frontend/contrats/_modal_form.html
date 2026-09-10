@@ -1,0 +1,131 @@
+<div class="modal-header">
+  <h5 class="modal-title">{% if contrat %}Modifier {{ contrat.reference }}{% else %}Nouveau contrat{% endif %}</h5>
+  <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fermer"></button>
+</div>
+<form method="post" action="{% if contrat %}{% url 'frontend:contrats-modifier' contrat.pk %}{% else %}{% url 'frontend:contrats-creer' %}{% endif %}">
+  {% csrf_token %}
+  <div class="modal-body">
+    <div class="row g-3">
+      <div class="col-md-6">
+        <label class="form-label">Chauffeur</label>
+        {% if contrat %}
+          <input type="text" class="form-control" value="{{ contrat.chauffeur.nom_complet }}" disabled>
+          <input type="hidden" name="chauffeur" value="{{ contrat.chauffeur_id }}">
+        {% else %}
+          <select name="chauffeur" class="form-select" required>
+            <option value="">— Sélectionner —</option>
+            {% for c in options.chauffeurs %}
+              <option value="{{ c.pk }}" {% if valeurs.chauffeur == c.pk|stringformat:"s" %}selected{% endif %}>{{ c.nom_complet }}</option>
+            {% endfor %}
+          </select>
+        {% endif %}
+        {% if erreurs.chauffeur %}<div class="text-danger small">{{ erreurs.chauffeur.0 }}</div>{% endif %}
+      </div>
+
+      <div class="col-md-6">
+        <label class="form-label">Type de contrat</label>
+        <select name="type_contrat" class="form-select" required>
+          <option value="">— Sélectionner —</option>
+          {% for t in options.types_contrat %}
+            <option value="{{ t.pk }}" {% if valeurs.type_contrat == t.pk|stringformat:"s" %}selected{% endif %}>{{ t.libelle }}</option>
+          {% endfor %}
+        </select>
+        {% if erreurs.type_contrat %}<div class="text-danger small">{{ erreurs.type_contrat.0 }}</div>{% endif %}
+      </div>
+
+      <div class="col-md-6">
+        <label class="form-label">Propriétaire</label>
+        <select name="proprietaire" class="form-select" required>
+          <option value="">— Sélectionner —</option>
+          {% for p in options.proprietaires %}
+            <option value="{{ p.pk }}" {% if valeurs.proprietaire == p.pk|stringformat:"s" %}selected{% endif %}>{{ p.nom_complet }}</option>
+          {% endfor %}
+        </select>
+        {% if erreurs.proprietaire %}<div class="text-danger small">{{ erreurs.proprietaire.0 }}</div>{% endif %}
+      </div>
+
+      <div class="col-md-6">
+        <label class="form-label">Agence</label>
+        <select name="agence" class="form-select">
+          <option value="">—</option>
+          {% for a in options.agences %}
+            <option value="{{ a.pk }}" {% if valeurs.agence == a.pk|stringformat:"s" %}selected{% endif %}>{{ a.nom }}</option>
+          {% endfor %}
+        </select>
+        {% if erreurs.agence %}<div class="text-danger small">{{ erreurs.agence.0 }}</div>{% endif %}
+      </div>
+
+      <div class="col-md-6">
+        <label class="form-label">Immatriculation</label>
+        <input type="text" name="immatriculation" class="form-control" value="{{ valeurs.immatriculation }}" required>
+        {% if erreurs.immatriculation %}<div class="text-danger small">{{ erreurs.immatriculation.0 }}</div>{% endif %}
+      </div>
+      <div class="col-md-6">
+        <label class="form-label">VIN</label>
+        <input type="text" name="vin" class="form-control" value="{{ valeurs.vin }}" required>
+        {% if erreurs.vin %}<div class="text-danger small">{{ erreurs.vin.0 }}</div>{% endif %}
+      </div>
+
+      <div class="col-md-4">
+        <label class="form-label">Montant total (F)</label>
+        <input type="number" step="0.01" name="montant_total" class="form-control" value="{{ valeurs.montant_total }}" required>
+        {% if erreurs.montant_total %}<div class="text-danger small">{{ erreurs.montant_total.0 }}</div>{% endif %}
+      </div>
+      <div class="col-md-4">
+        <label class="form-label">Montant par échéance (F)</label>
+        <input type="number" step="0.01" name="montant_par_paiement" class="form-control" value="{{ valeurs.montant_par_paiement }}" required>
+        {% if erreurs.montant_par_paiement %}<div class="text-danger small">{{ erreurs.montant_par_paiement.0 }}</div>{% endif %}
+      </div>
+      <div class="col-md-4">
+        <label class="form-label">Montant déjà payé (F)</label>
+        <input type="number" step="0.01" name="montant_paye" class="form-control" value="{{ valeurs.montant_paye|default_if_none:'0' }}">
+      </div>
+
+      <div class="col-md-4">
+        <label class="form-label">Fréquence</label>
+        <select name="frequence" class="form-select" required>
+          {% for code, libelle in frequences %}
+            <option value="{{ code }}" {% if valeurs.frequence == code %}selected{% endif %}>{{ libelle }}</option>
+          {% endfor %}
+        </select>
+        {% if erreurs.frequence %}<div class="text-danger small">{{ erreurs.frequence.0 }}</div>{% endif %}
+      </div>
+      <div class="col-md-4">
+        <label class="form-label">Date de début</label>
+        <input type="date" name="date_debut" class="form-control" value="{{ valeurs.date_debut }}" required>
+        {% if erreurs.date_debut %}<div class="text-danger small">{{ erreurs.date_debut.0 }}</div>{% endif %}
+      </div>
+      <div class="col-md-4">
+        <label class="form-label">Date de fin</label>
+        <input type="date" name="date_fin" class="form-control" value="{{ valeurs.date_fin }}" required>
+        {% if erreurs.date_fin %}<div class="text-danger small">{{ erreurs.date_fin.0 }}</div>{% endif %}
+      </div>
+
+      <div class="col-md-6">
+        <label class="form-label">Prochaine échéance</label>
+        <input type="datetime-local" name="prochaine_echeance" class="form-control" value="{{ valeurs.prochaine_echeance }}" required>
+        {% if erreurs.prochaine_echeance %}<div class="text-danger small">{{ erreurs.prochaine_echeance.0 }}</div>{% endif %}
+      </div>
+      {% if contrat %}
+      <div class="col-md-6">
+        <label class="form-label">Statut</label>
+        <select name="statut" class="form-select">
+          {% for code, libelle in statuts %}
+            <option value="{{ code }}" {% if valeurs.statut == code %}selected{% endif %}>{{ libelle }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      {% endif %}
+
+      {% include 'frontend/contrats/_champs_specificites.html' %}
+    </div>
+
+    {% if erreurs.non_field_errors %}
+      <div class="alert alert-danger mt-3 mb-0">{{ erreurs.non_field_errors.0 }}</div>
+    {% endif %}
+  </div>
+  <div class="modal-footer">
+    <button type="button" class="btn btn-link" data-bs-dismiss="modal">Annuler</button>
+    <button type="submit" class="btn btn-primary">Enregistrer</button>
+  </div>
+</form>

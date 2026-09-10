@@ -1,0 +1,72 @@
+{% extends 'frontend/base.html' %}
+{% block titre %}{{ chauffeur.nom_complet }}{% endblock %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h1 class="h3 mb-0">{{ chauffeur.nom_complet }}</h1>
+  <div>
+    {% if peut_modifier %}
+      <button type="button" class="btn btn-outline-secondary" data-modal-url="{% url 'frontend:chauffeurs-modifier' chauffeur.pk %}">Modifier</button>
+    {% endif %}
+    {% if peut_supprimer %}
+      <button type="button" class="btn btn-outline-danger" data-bs-toggle="modal" data-bs-target="#modal-supprimer-chauffeur">Supprimer</button>
+    {% endif %}
+  </div>
+</div>
+
+{% if peut_supprimer %}
+<div class="modal fade" id="modal-supprimer-chauffeur" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Supprimer {{ chauffeur.nom_complet }} ?</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fermer"></button>
+      </div>
+      <div class="modal-body">
+        <p class="mb-0">S'il a déjà un historique de contrats ou paiements, son compte sera désactivé plutôt que supprimé.</p>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-link" data-bs-dismiss="modal">Annuler</button>
+        <form method="post" action="{% url 'frontend:chauffeurs-supprimer' chauffeur.pk %}">
+          {% csrf_token %}
+          <button type="submit" class="btn btn-danger">Confirmer</button>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+<div class="card mb-4">
+  <div class="card-body">
+    <div class="row">
+      <div class="col-md-4"><strong>Email</strong><br>{{ chauffeur.email|default:"—" }}</div>
+      <div class="col-md-4"><strong>Identifiant Keycloak</strong><br>{{ chauffeur.keycloak_id }}</div>
+      <div class="col-md-4">
+        <strong>Statut</strong><br>
+        {% if chauffeur.is_active %}
+          <span class="badge bg-success">Actif</span>
+        {% else %}
+          <span class="badge bg-secondary">Désactivé</span>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+
+<h2 class="h5 mb-2">Contrats</h2>
+<table class="table table-sm bg-white">
+  <thead><tr><th>Référence</th><th>Type</th><th>Statut</th><th>Reste à payer</th></tr></thead>
+  <tbody>
+    {% for contrat in contrats %}
+    <tr>
+      <td><a href="{% url 'frontend:contrats-detail' contrat.pk %}">{{ contrat.reference }}</a></td>
+      <td>{{ contrat.type_contrat.libelle|default:"—" }}</td>
+      <td>{{ contrat.get_statut_display }}</td>
+      <td>{{ contrat.montant_restant }} F</td>
+    </tr>
+    {% empty %}
+    <tr><td colspan="4" class="text-muted">Aucun contrat.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

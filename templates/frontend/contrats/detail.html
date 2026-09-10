@@ -1,0 +1,136 @@
+{% extends 'frontend/base.html' %}
+{% block titre %}{{ contrat.reference }}{% endblock %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h1 class="h3 mb-0">{{ contrat.reference }} — {{ contrat.chauffeur.nom_complet }}</h1>
+  {% if peut_modifier %}
+    <button type="button" class="btn btn-outline-secondary" data-modal-url="{% url 'frontend:contrats-modifier' contrat.pk %}">Modifier</button>
+  {% endif %}
+</div>
+
+<div class="card mb-4">
+  <div class="card-body">
+    <div class="row">
+      <div class="col-md-3"><strong>Statut</strong><br>{{ contrat.get_statut_display }}</div>
+      <div class="col-md-3"><strong>Type</strong><br>{{ contrat.type_contrat.libelle|default:"—" }}</div>
+      <div class="col-md-3"><strong>Propriétaire</strong><br>{{ contrat.proprietaire.nom_complet|default:"—" }}</div>
+      <div class="col-md-3"><strong>Agence</strong><br>{{ contrat.agence.nom|default:"—" }}</div>
+    </div>
+    <hr>
+    <div class="row">
+      <div class="col-md-3"><strong>Montant total</strong><br>{{ contrat.montant_total }} F</div>
+      <div class="col-md-3"><strong>Montant payé</strong><br>{{ contrat.montant_paye }} F</div>
+      <div class="col-md-3"><strong>Reste à payer</strong><br>{{ contrat.montant_restant }} F</div>
+      <div class="col-md-3"><strong>Échéance</strong><br>{{ contrat.montant_par_paiement }} F / {{ contrat.get_frequence_display }}</div>
+    </div>
+    <hr>
+    <div class="row">
+      <div class="col-md-3"><strong>VIN</strong><br>{{ contrat.vin|default:"—" }}</div>
+      <div class="col-md-3"><strong>Immatriculation</strong><br>{{ contrat.immatriculation|default:"—" }}</div>
+      <div class="col-md-3"><strong>Période</strong><br>{{ contrat.date_debut }} → {{ contrat.date_fin }}</div>
+      <div class="col-md-3"><strong>Prochaine échéance</strong><br>{{ contrat.prochaine_echeance|date:"d/m/Y H:i"|default:"—" }}</div>
+    </div>
+  </div>
+</div>
+
+<div class="d-flex justify-content-between align-items-center mb-2">
+  <h2 class="h5 mb-0">Sous-contrats</h2>
+  {% if peut_ajouter_sous_contrat and not contrat.parent_id %}
+    <button type="button" class="btn btn-sm btn-outline-primary" data-modal-url="{% url 'frontend:contrats-sous-contrat' contrat.pk %}">Ajouter un sous-contrat</button>
+  {% endif %}
+</div>
+<table class="table table-sm bg-white mb-4">
+  <thead><tr><th>Référence</th><th>Type</th><th>Statut</th><th>Reste à payer</th></tr></thead>
+  <tbody>
+    {% for sc in sous_contrats %}
+    <tr>
+      <td><a href="{% url 'frontend:contrats-detail' sc.pk %}">{{ sc.reference }}</a></td>
+      <td>{{ sc.type_contrat.libelle }}</td>
+      <td>{{ sc.get_statut_display }}</td>
+      <td>{{ sc.montant_restant }} F</td>
+    </tr>
+    {% empty %}
+    <tr><td colspan="4" class="text-muted">Aucun sous-contrat.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<div class="d-flex justify-content-between align-items-center mb-2">
+  <h2 class="h5 mb-0">Échéances</h2>
+  {% if peut_annuler_leases %}
+    <button type="button" class="btn btn-sm btn-outline-warning" data-bs-toggle="modal" data-bs-target="#modal-annuler-leases">
+      Annuler des échéances
+    </button>
+  {% endif %}
+</div>
+<form method="post" action="{% url 'frontend:contrats-annuler-leases' contrat.pk %}">
+  {% csrf_token %}
+  <table class="table table-sm bg-white mb-2">
+    <thead><tr>{% if peut_annuler_leases %}<th></th>{% endif %}<th>Date</th><th>Montant attendu</th><th>Payé</th><th>Statut</th><th></th></tr></thead>
+    <tbody>
+      {% for lease in leases %}
+      <tr>
+        {% if peut_annuler_leases %}
+        <td>{% if lease.statut == 'NON_PAYE' %}<input type="checkbox" name="lease_ids" value="{{ lease.pk }}">{% endif %}</td>
+        {% endif %}
+        <td>{{ lease.date_echeance|date:"d/m/Y" }}</td>
+        <td>{{ lease.montant_attendu }} F</td>
+        <td>{{ lease.montant_paye }} F</td>
+        <td>{{ lease.get_statut_display }}</td>
+        <td>
+          {% if peut_encaisser and lease.statut != 'PAYE' and lease.statut != 'ANNULE' %}
+            <button type="button" class="btn btn-sm btn-outline-success" data-modal-url="{% url 'frontend:paiements-creer' %}?lease={{ lease.pk }}">Encaisser</button>
+          {% endif %}
+        </td>
+      </tr>
+      {% empty %}
+      <tr><td colspan="6" class="text-muted">Aucune échéance.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  {% if peut_annuler_leases %}
+  <div class="modal fade" id="modal-annuler-leases" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title">Annuler les échéances cochées</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fermer"></button>
+        </div>
+        <div class="modal-body">
+          <p class="text-muted small">Coche les échéances non payées dans le tableau avant d'ouvrir cette fenêtre, puis choisis le nombre de jours ouvrés à ajouter à la date de fin du contrat.</p>
+          <label class="form-label">Jours ouvrés à ajouter à la date de fin</label>
+          <input type="number" name="jours_a_prolonger" value="0" min="0" class="form-control">
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-link" data-bs-dismiss="modal">Annuler</button>
+          <button class="btn btn-warning" type="submit">Confirmer l'annulation</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+</form>
+
+<h2 class="h5 mb-2">Paiements</h2>
+<table class="table table-sm bg-white">
+  <thead><tr><th>Date</th><th>Montant</th><th>Méthode</th><th>Statut</th><th></th></tr></thead>
+  <tbody>
+    {% for paiement in paiements %}
+    <tr>
+      <td>{{ paiement.date_paiement|date:"d/m/Y H:i"|default:"—" }}</td>
+      <td>{{ paiement.montant }} F</td>
+      <td>{{ paiement.get_methode_display }}</td>
+      <td>{{ paiement.get_statut_display }}</td>
+      <td>
+        {% if paiement.methode == 'ESPECES' and perms.recouvrement.change_paiement %}
+          <button type="button" class="btn btn-sm btn-outline-secondary" data-modal-url="{% url 'frontend:paiements-modifier' paiement.pk %}">Corriger</button>
+        {% endif %}
+      </td>
+    </tr>
+    {% empty %}
+    <tr><td colspan="5" class="text-muted">Aucun paiement.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

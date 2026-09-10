@@ -1,0 +1,47 @@
+{% extends 'frontend/base.html' %}
+{% block titre %}Transactions{% endblock %}
+{% block content %}
+<h1 class="h3 mb-3">Transactions</h1>
+
+<form method="get" class="row g-2 mb-3">
+  <div class="col-auto">
+    <input type="text" name="q" value="{{ recherche }}" class="form-control" placeholder="Référence, téléphone...">
+  </div>
+  <div class="col-auto">
+    <select name="canal" class="form-select">
+      <option value="">Tous les canaux</option>
+      {% for code, libelle in canaux %}
+        <option value="{{ code }}" {% if code == canal %}selected{% endif %}>{{ libelle }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="col-auto">
+    <select name="statut" class="form-select">
+      <option value="">Tous les statuts</option>
+      {% for code, libelle in statuts %}
+        <option value="{{ code }}" {% if code == statut %}selected{% endif %}>{{ libelle }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="col-auto"><button class="btn btn-outline-secondary" type="submit">Filtrer</button></div>
+</form>
+
+<table class="table table-striped bg-white">
+  <thead><tr><th>Référence</th><th>Canal</th><th>Montant</th><th>Téléphone</th><th>Statut</th><th></th></tr></thead>
+  <tbody>
+    {% for session in page_obj %}
+    <tr>
+      <td>{{ session.reference }}</td>
+      <td>{{ session.get_canal_display }}</td>
+      <td>{{ session.montant_total }} F</td>
+      <td>{{ session.telephone|default:"—" }}</td>
+      <td>{{ session.get_statut_display }}</td>
+      <td><a href="{% url 'frontend:transactions-detail' session.pk %}" class="btn btn-sm btn-outline-primary">Voir</a></td>
+    </tr>
+    {% empty %}
+    <tr><td colspan="6" class="text-center text-muted">Aucune transaction.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% include 'frontend/_pagination.html' %}
+{% endblock %}

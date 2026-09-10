@@ -1,0 +1,38 @@
+<div class="modal-header">
+  <h5 class="modal-title">Ajouter un compte de réception à {{ proprietaire.nom_complet }}</h5>
+  <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fermer"></button>
+</div>
+<form method="post" action="{% url 'frontend:proprietaires-compte-reception-creer' proprietaire.pk %}">
+  {% csrf_token %}
+  <div class="modal-body">
+    <div class="mb-3">
+      <label class="form-label">Opérateur</label>
+      <select name="operateur" class="form-select" required>
+        <option value="ORANGE">Orange Money</option>
+        <option value="MTN">MTN Mobile Money</option>
+      </select>
+      {% if erreurs.operateur %}<div class="text-danger small">{{ erreurs.operateur.0 }}</div>{% endif %}
+    </div>
+
+    <div class="mb-3">
+      <label class="form-label">Numéro</label>
+      <input type="text" name="numero" class="form-control" placeholder="690169694" required>
+      <div class="form-text">9 chiffres, avec ou sans l'indicatif 237.</div>
+      {% if erreurs.numero %}<div class="text-danger small">{{ erreurs.numero.0 }}</div>{% endif %}
+    </div>
+
+    <div class="mb-3">
+      <label class="form-label">Nom du titulaire</label>
+      <input type="text" name="nom_titulaire" class="form-control" value="{{ proprietaire.nom_complet }}">
+      {% if erreurs.nom_titulaire %}<div class="text-danger small">{{ erreurs.nom_titulaire.0 }}</div>{% endif %}
+    </div>
+
+    {% if erreurs.non_field_errors %}
+      <div class="alert alert-danger mb-0">{{ erreurs.non_field_errors.0 }}</div>
+    {% endif %}
+  </div>
+  <div class="modal-footer">
+    <button type="button" class="btn btn-link" data-bs-dismiss="modal">Annuler</button>
+    <button type="submit" class="btn btn-primary">Ajouter</button>
+  </div>
+</form>

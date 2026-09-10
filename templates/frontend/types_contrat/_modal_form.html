@@ -1,0 +1,33 @@
+<div class="modal-header">
+  <h5 class="modal-title">{% if type_contrat %}Modifier {{ type_contrat.libelle }}{% else %}Nouveau type de contrat{% endif %}</h5>
+  <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fermer"></button>
+</div>
+<form method="post" action="{% if type_contrat %}{% url 'frontend:types-contrat-modifier' type_contrat.pk %}{% else %}{% url 'frontend:types-contrat-creer' %}{% endif %}">
+  {% csrf_token %}
+  <div class="modal-body">
+    <div class="mb-3">
+      <label class="form-label">Libellé</label>
+      <input type="text" name="libelle" class="form-control" value="{{ valeurs.libelle }}" required>
+      {% if erreurs.libelle %}<div class="text-danger small">{{ erreurs.libelle.0 }}</div>{% endif %}
+    </div>
+    <div class="mb-3">
+      <label class="form-label">Code</label>
+      <input type="text" name="code" class="form-control" value="{{ valeurs.code }}" required>
+      {% if erreurs.code %}<div class="text-danger small">{{ erreurs.code.0 }}</div>{% endif %}
+    </div>
+    <div class="form-check mb-3">
+      <input type="hidden" name="est_principal" value="false">
+      <input type="checkbox" name="est_principal" id="id_est_principal" class="form-check-input" value="true" {% if valeurs.est_principal %}checked{% endif %}>
+      <label class="form-check-label" for="id_est_principal">Type principal (ex : Véhicule)</label>
+      <div class="form-text">Décochez pour un accessoire (ex : Téléphone, GPS...).</div>
+    </div>
+
+    {% if erreurs.non_field_errors %}
+      <div class="alert alert-danger mb-0">{{ erreurs.non_field_errors.0 }}</div>
+    {% endif %}
+  </div>
+  <div class="modal-footer">
+    <button type="button" class="btn btn-link" data-bs-dismiss="modal">Annuler</button>
+    <button type="submit" class="btn btn-primary">Enregistrer</button>
+  </div>
+</form>

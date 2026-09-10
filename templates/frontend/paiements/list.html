@@ -1,0 +1,53 @@
+{% extends 'frontend/base.html' %}
+{% block titre %}Paiements{% endblock %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h1 class="h3 mb-0">Paiements</h1>
+  {% if perms.recouvrement.add_paiement %}
+    <button type="button" class="btn btn-primary" data-modal-url="{% url 'frontend:paiements-creer' %}">Encaisser un paiement</button>
+  {% endif %}
+</div>
+
+<form method="get" class="row g-2 mb-3">
+  <div class="col-auto">
+    <select name="statut" class="form-select">
+      <option value="">Tous les statuts</option>
+      {% for code, libelle in statuts %}
+        <option value="{{ code }}" {% if code == statut %}selected{% endif %}>{{ libelle }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="col-auto">
+    <select name="methode" class="form-select">
+      <option value="">Toutes les méthodes</option>
+      {% for code, libelle in methodes %}
+        <option value="{{ code }}" {% if code == methode %}selected{% endif %}>{{ libelle }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="col-auto"><button class="btn btn-outline-secondary" type="submit">Filtrer</button></div>
+</form>
+
+<table class="table table-striped bg-white">
+  <thead><tr><th>Date</th><th>Contrat</th><th>Montant</th><th>Méthode</th><th>Statut</th><th></th></tr></thead>
+  <tbody>
+    {% for paiement in page_obj %}
+    <tr>
+      <td>{{ paiement.date_paiement|date:"d/m/Y H:i"|default:"—" }}</td>
+      <td><a href="{% url 'frontend:contrats-detail' paiement.contrat_id %}">{{ paiement.contrat.reference }}</a></td>
+      <td>{{ paiement.montant }} F</td>
+      <td>{{ paiement.get_methode_display }}</td>
+      <td>{{ paiement.get_statut_display }}</td>
+      <td>
+        {% if paiement.methode == 'ESPECES' and perms.recouvrement.change_paiement %}
+          <button type="button" class="btn btn-sm btn-outline-secondary" data-modal-url="{% url 'frontend:paiements-modifier' paiement.pk %}">Corriger</button>
+        {% endif %}
+      </td>
+    </tr>
+    {% empty %}
+    <tr><td colspan="6" class="text-muted text-center">Aucun paiement.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% include 'frontend/_pagination.html' %}
+{% endblock %}

@@ -1,0 +1,53 @@
+<div class="col-12">
+  <div class="d-flex justify-content-between align-items-center">
+    <label class="form-label mb-0">Spécificités techniques</label>
+    <button type="button" class="btn btn-sm btn-outline-secondary" id="specificite-ajouter">+ Ajouter</button>
+  </div>
+  <div class="form-text mb-2">Attributs libres propres à ce contrat (ex : marque, IMEI, numéro de série...).</div>
+  <div id="specificite-lignes">
+    {% for cle, valeur in specificites_lignes %}
+    <div class="row g-2 mb-2 specificite-ligne">
+      <div class="col-5">
+        <input type="text" name="specificite_cle" class="form-control form-control-sm" placeholder="Clé (ex : marque)" value="{{ cle }}">
+      </div>
+      <div class="col-6">
+        <input type="text" name="specificite_valeur" class="form-control form-control-sm" placeholder="Valeur" value="{{ valeur }}">
+      </div>
+      <div class="col-1">
+        <button type="button" class="btn btn-sm btn-outline-danger specificite-supprimer" aria-label="Supprimer">&times;</button>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% if erreurs.specificites %}<div class="text-danger small">{{ erreurs.specificites.0 }}</div>{% endif %}
+</div>
+<script>
+(function () {
+  var conteneur = document.getElementById('specificite-lignes');
+  var bouton = document.getElementById('specificite-ajouter');
+  if (!conteneur || !bouton) {
+    return;
+  }
+
+  function nouvelleLigne() {
+    var ligne = document.createElement('div');
+    ligne.className = 'row g-2 mb-2 specificite-ligne';
+    ligne.innerHTML =
+      '<div class="col-5"><input type="text" name="specificite_cle" class="form-control form-control-sm" placeholder="Clé (ex : marque)"></div>' +
+      '<div class="col-6"><input type="text" name="specificite_valeur" class="form-control form-control-sm" placeholder="Valeur"></div>' +
+      '<div class="col-1"><button type="button" class="btn btn-sm btn-outline-danger specificite-supprimer" aria-label="Supprimer">&times;</button></div>';
+    return ligne;
+  }
+
+  bouton.addEventListener('click', function () {
+    conteneur.appendChild(nouvelleLigne());
+  });
+
+  conteneur.addEventListener('click', function (evt) {
+    var supprimer = evt.target.closest('.specificite-supprimer');
+    if (supprimer) {
+      supprimer.closest('.specificite-ligne').remove();
+    }
+  });
+})();
+</script>

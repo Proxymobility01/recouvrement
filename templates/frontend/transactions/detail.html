@@ -1,0 +1,122 @@
+{% extends 'frontend/base.html' %}
+{% block titre %}{{ session.reference }}{% endblock %}
+{% block content %}
+<h1 class="h3 mb-3">{{ session.reference }}</h1>
+
+<div class="card mb-4">
+  <div class="card-body">
+    <div class="row">
+      <div class="col-md-3"><strong>Canal</strong><br>{{ session.get_canal_display }}</div>
+      <div class="col-md-3"><strong>Statut</strong><br>{{ session.get_statut_display }}</div>
+      <div class="col-md-3"><strong>Montant</strong><br>{{ session.montant_total }} F</div>
+      <div class="col-md-3"><strong>Téléphone</strong><br>{{ session.telephone|default:"—" }}</div>
+    </div>
+    <hr>
+    <div class="row">
+      <div class="col-md-3"><strong>Propriétaire</strong><br>
+        {% if session.proprietaire %}
+          <a href="{% url 'frontend:proprietaires-detail' session.proprietaire_id %}">{{ session.proprietaire.nom_complet }}</a>
+        {% else %}—{% endif %}
+      </div>
+      <div class="col-md-3"><strong>Destinataire</strong><br>{{ session.numero_destinataire|default:"—" }}</div>
+      <div class="col-md-3"><strong>Opérateur</strong><br>{{ session.operateur|default:"—" }}</div>
+      <div class="col-md-3"><strong>Validée le</strong><br>{{ session.date_validation|date:"d/m/Y H:i"|default:"—" }}</div>
+    </div>
+  </div>
+</div>
+
+<h2 class="h5 mb-2">Lignes de paiement</h2>
+<table class="table table-sm bg-white mb-4">
+  <thead><tr><th>Contrat</th><th>Échéance</th><th>Montant</th><th>Statut</th></tr></thead>
+  <tbody>
+    {% for ligne in lignes %}
+    <tr>
+      <td><a href="{% url 'frontend:contrats-detail' ligne.contrat_id %}">{{ ligne.contrat.reference }}</a></td>
+      <td>{{ ligne.lease.date_echeance|date:"d/m/Y"|default:"—" }}</td>
+      <td>{{ ligne.montant }} F</td>
+      <td>{{ ligne.get_statut_display }}</td>
+    </tr>
+    {% empty %}
+    <tr><td colspan="4" class="text-muted">Aucune ligne.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+{% if preuve %}
+<h2 class="h5 mb-2">Preuve de paiement USSD</h2>
+<div class="card mb-4">
+  <div class="card-body">
+    <div class="row mb-3">
+      <div class="col-md-3"><strong>Statut</strong><br>{{ preuve.get_statut_display }}</div>
+      <div class="col-md-3"><strong>Référence opérateur</strong><br>{{ preuve.reference_operateur }}</div>
+      <div class="col-md-3"><strong>Montant transféré</strong><br>{{ preuve.montant_transfere }} F</div>
+      <div class="col-md-3"><strong>Frais</strong><br>{{ preuve.frais_operateur }} F</div>
+    </div>
+    <div class="row mb-3">
+      <div class="col-md-6"><strong>Expéditeur</strong><br>{{ preuve.nom_expediteur|default:"—" }} ({{ preuve.numero_expediteur }})</div>
+      <div class="col-md-6"><strong>Destinataire</strong><br>{{ preuve.nom_destinataire|default:"—" }} ({{ preuve.numero_destinataire }})</div>
+    </div>
+    <div class="mb-3">
+      <strong>Texte du SMS</strong>
+      <pre class="bg-light p-2 small">{{ preuve.texte_brut }}</pre>
+    </div>
+    {% if preuve.motif_rejet %}
+      <div class="alert alert-warning">Motif du rejet : {{ preuve.motif_rejet }}</div>
+    {% endif %}
+    {% if preuve.verifie_par %}
+      <p class="text-muted small">Vérifiée par {{ preuve.verifie_par.nom_complet }} le {{ preuve.verifie_le|date:"d/m/Y H:i" }}</p>
+    {% endif %}
+
+    {% if peut_verifier_ussd and preuve.statut == 'EN_VERIFICATION' %}
+    <div class="d-flex gap-2 mt-3">
+      <button type="button" class="btn btn-success" data-bs-toggle="modal" data-bs-target="#modal-valider-preuve">Valider la preuve</button>
+      <button type="button" class="btn btn-outline-danger" data-bs-toggle="modal" data-bs-target="#modal-rejeter-preuve">Rejeter la preuve</button>
+    </div>
+
+    <div class="modal fade" id="modal-valider-preuve" tabindex="-1" aria-hidden="true">
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title">Valider cette preuve de paiement ?</h5>
+            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fermer"></button>
+          </div>
+          <div class="modal-body">
+            <p class="mb-0">La ventilation des paiements sera déclenchée immédiatement après validation.</p>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-link" data-bs-dismiss="modal">Annuler</button>
+            <form method="post" action="{% url 'frontend:transactions-valider-ussd' session.pk %}">
+              {% csrf_token %}
+              <button type="submit" class="btn btn-success">Confirmer la validation</button>
+            </form>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal fade" id="modal-rejeter-preuve" tabindex="-1" aria-hidden="true">
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+          <form method="post" action="{% url 'frontend:transactions-rejeter-ussd' session.pk %}">
+            {% csrf_token %}
+            <div class="modal-header">
+              <h5 class="modal-title">Rejeter cette preuve de paiement</h5>
+              <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fermer"></button>
+            </div>
+            <div class="modal-body">
+              <label class="form-label">Motif du rejet</label>
+              <input type="text" name="motif" class="form-control" placeholder="Ex: référence de transaction illisible" required>
+            </div>
+            <div class="modal-footer">
+              <button type="button" class="btn btn-link" data-bs-dismiss="modal">Annuler</button>
+              <button type="submit" class="btn btn-danger">Confirmer le rejet</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+{% endblock %}

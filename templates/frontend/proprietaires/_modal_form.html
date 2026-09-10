@@ -1,0 +1,30 @@
+<div class="modal-header">
+  <h5 class="modal-title">{% if proprietaire %}Modifier {{ proprietaire.nom_complet }}{% else %}Nouveau propriétaire{% endif %}</h5>
+  <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fermer"></button>
+</div>
+<form method="post" action="{% if proprietaire %}{% url 'frontend:proprietaires-modifier' proprietaire.pk %}{% else %}{% url 'frontend:proprietaires-creer' %}{% endif %}">
+  {% csrf_token %}
+  <div class="modal-body">
+    <div class="mb-3">
+      <label class="form-label">Nom complet</label>
+      <input type="text" name="nom_complet" class="form-control" value="{{ valeurs.nom_complet }}" required>
+      {% if erreurs.nom_complet %}<div class="text-danger small">{{ erreurs.nom_complet.0 }}</div>{% endif %}
+    </div>
+
+    {% if proprietaire %}
+    <div class="form-check mb-3">
+      <input type="hidden" name="actif" value="false">
+      <input type="checkbox" name="actif" id="id_actif" class="form-check-input" value="true" {% if valeurs.actif %}checked{% endif %}>
+      <label class="form-check-label" for="id_actif">Actif</label>
+    </div>
+    {% endif %}
+
+    {% if erreurs.non_field_errors %}
+      <div class="alert alert-danger mb-0">{{ erreurs.non_field_errors.0 }}</div>
+    {% endif %}
+  </div>
+  <div class="modal-footer">
+    <button type="button" class="btn btn-link" data-bs-dismiss="modal">Annuler</button>
+    <button type="submit" class="btn btn-primary">Enregistrer</button>
+  </div>
+</form>

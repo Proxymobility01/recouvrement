@@ -1,0 +1,17 @@
+{% extends 'frontend/base.html' %}
+{% block titre %}Connexion{% endblock %}
+{% block content %}
+<div class="row justify-content-center mt-5">
+  <div class="col-md-5">
+    <div class="card shadow-sm">
+      <div class="card-body text-center p-4">
+        <h1 class="h4 mb-3">Espace partenaire</h1>
+        {% if erreur %}
+          <div class="alert alert-danger">{{ erreur }}</div>
+        {% endif %}
+        <a href="{% url 'frontend:login' %}" class="btn btn-primary w-100">Se connecter</a>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

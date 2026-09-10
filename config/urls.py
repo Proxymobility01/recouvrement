@@ -15,6 +15,7 @@ Including another URLconf
     2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
 """
 from django.contrib import admin
+from django.contrib.staticfiles.urls import staticfiles_urlpatterns
 from django.urls import path, include
 
 
@@ -24,7 +25,14 @@ urlpatterns = [
     path('api/v1/accounts/', include('accounts.api.v1.urls')),
     path('api/v1/', include('statistiques.api.v1.urls')),
     path('api/v1/', include('core.api.v1.urls')),
+    path('partenaire/', include('frontend.urls')),
 ]
+
+# Le service tourne ici via uvicorn directement (pas `manage.py runserver`),
+# qui ne branche pas automatiquement le service des fichiers statiques en
+# développement. staticfiles_urlpatterns() ne s'active que si DEBUG=True
+# (no-op en production), donc sans risque hors dev.
+urlpatterns += staticfiles_urlpatterns()
 
 handler404 = 'core.exceptions.custom_404_handler'
 handler500 = 'core.exceptions.custom_500_handler'

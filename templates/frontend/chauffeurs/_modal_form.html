@@ -1,0 +1,51 @@
+<div class="modal-header">
+  <h5 class="modal-title">{% if chauffeur %}Modifier {{ chauffeur.nom_complet }}{% else %}Nouveau chauffeur{% endif %}</h5>
+  <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fermer"></button>
+</div>
+<form method="post" action="{% if chauffeur %}{% url 'frontend:chauffeurs-modifier' chauffeur.pk %}{% else %}{% url 'frontend:chauffeurs-creer' %}{% endif %}">
+  {% csrf_token %}
+  <div class="modal-body">
+    <div class="mb-3">
+      <label class="form-label">Identifiant Keycloak</label>
+      {% if chauffeur %}
+        <input type="text" class="form-control" value="{{ chauffeur.keycloak_id }}" disabled>
+        <input type="hidden" name="keycloak_id" value="{{ chauffeur.keycloak_id }}">
+      {% else %}
+        <input type="text" name="keycloak_id" class="form-control" value="{{ valeurs.keycloak_id }}" required>
+        <div class="form-text">Identifiant du compte Keycloak déjà créé pour ce chauffeur.</div>
+      {% endif %}
+      {% if erreurs.keycloak_id %}<div class="text-danger small">{{ erreurs.keycloak_id.0 }}</div>{% endif %}
+    </div>
+
+    <div class="mb-3">
+      <label class="form-label">Nom complet</label>
+      <input type="text" name="nom_complet" class="form-control" value="{{ valeurs.nom_complet }}" required>
+      {% if erreurs.nom_complet %}<div class="text-danger small">{{ erreurs.nom_complet.0 }}</div>{% endif %}
+    </div>
+
+    <div class="mb-3">
+      <label class="form-label">Email</label>
+      <input type="email" name="email" class="form-control" value="{{ valeurs.email }}">
+      {% if erreurs.email %}<div class="text-danger small">{{ erreurs.email.0 }}</div>{% endif %}
+    </div>
+
+    {% if chauffeur %}
+    <div class="form-check mb-3">
+      {# Input caché avant la case : une case décochée n'est jamais envoyée
+         par le navigateur, donc sans lui, "is_active" resterait absent du
+         POST et ne serait jamais mis à jour à false (partial=True l'ignorerait). #}
+      <input type="hidden" name="is_active" value="false">
+      <input type="checkbox" name="is_active" id="id_is_active" class="form-check-input" value="true" {% if valeurs.is_active %}checked{% endif %}>
+      <label class="form-check-label" for="id_is_active">Compte actif</label>
+    </div>
+    {% endif %}
+
+    {% if erreurs.non_field_errors %}
+      <div class="alert alert-danger mb-0">{{ erreurs.non_field_errors.0 }}</div>
+    {% endif %}
+  </div>
+  <div class="modal-footer">
+    <button type="button" class="btn btn-link" data-bs-dismiss="modal">Annuler</button>
+    <button type="submit" class="btn btn-primary">Enregistrer</button>
+  </div>
+</form>

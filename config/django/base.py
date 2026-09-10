@@ -49,6 +49,7 @@ INSTALLED_APPS = [
     'accounts',
     'recouvrement',
     'statistiques',
+    'frontend',
 ]
 
 
@@ -90,8 +91,10 @@ ROOT_URLCONF = 'config.urls'
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [BASE_DIR / 'templates']
-        ,
+        # BASE_DIR ci-dessus pointe sur config/ (utilisé tel quel par
+        # STATIC_ROOT/MEDIA_ROOT, ne pas y toucher) ; le dossier templates/
+        # du projet est un niveau au-dessus.
+        'DIRS': [BASE_DIR.parent / 'templates'],
         'APP_DIRS': True,
         'OPTIONS': {
             'context_processors': [
@@ -180,6 +183,12 @@ USE_I18N = True
 USE_TZ = True
 
 AUTH_USER_MODEL = 'accounts.CustomUser'
+
+# Back-office partenaire (frontend Django server-rendu, session Keycloak SSO)
+LOGIN_URL = '/partenaire/login/'
+LOGIN_REDIRECT_URL = '/partenaire/contrats/'
+LOGOUT_REDIRECT_URL = '/partenaire/login/'
+
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/6.0/howto/static-files/
 
