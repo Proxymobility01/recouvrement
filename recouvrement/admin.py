@@ -26,6 +26,7 @@ from .models import (
     PreuvePaiementUSSD,
     Lease,
     Paiement,
+    Depense,
     Parametre,
     ReglePenalite,
     Penalite,
@@ -1066,6 +1067,41 @@ class PaiementAdmin(IdCompteAdminMixin, admin.ModelAdmin):
         'updated_at',
     )
     ordering = ('-date_paiement',)
+
+
+@admin.register(Depense)
+class DepenseAdmin(IdCompteAdminMixin, admin.ModelAdmin):
+    list_display = (
+        'id_compte', 'contrat', 'categorie', 'libelle', 'montant',
+        'date_depense', 'agence', 'enregistre_par', 'created_at',
+    )
+    list_select_related = ('contrat', 'agence', 'enregistre_par')
+    list_filter = (
+        ('date_depense', DateRangeAvecHierFilter),
+        'categorie', 'compte_id', 'agence',
+    )
+    search_fields = (
+        'libelle', 'description', 'fournisseur',
+        'contrat__reference', 'contrat__nom_complet',
+    )
+    raw_id_fields = ('contrat', 'enregistre_par')
+    readonly_fields = ('agence', 'created_at', 'updated_at')
+    ordering = ('-date_depense',)
+
+    fieldsets = (
+        ('Liaison', {
+            'fields': ('compte_id', 'agence', 'contrat', 'enregistre_par')
+        }),
+        ('Détails de la dépense', {
+            'fields': (
+                'categorie', 'libelle', 'description', 'montant',
+                'date_depense', 'fournisseur',
+            )
+        }),
+        ('Dates système', {
+            'fields': ('created_at', 'updated_at')
+        }),
+    )
 
 
 @admin.register(Parametre)

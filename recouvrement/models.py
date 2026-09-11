@@ -1106,17 +1106,6 @@ class Paiement(AgenceScopedModel):
             ("can_cancel_payment", "Peut annuler une transaction erronée"),
             ("view_all_paiements", "Peut voir tous les paiements de son entreprise"),
         ]
-        constraints = [
-            models.UniqueConstraint(
-                fields=['lease'],
-                condition=(
-                    Q(methode='USSD_ASSISTE')
-                    & Q(statut='EN_ATTENTE')
-                    & Q(est_annule=False)
-                ),
-                name='uniq_paie_ussd_attente_lease',
-            ),
-        ]
         indexes = [
             models.Index(fields=['-created_at'], name='idx_paie_created_at'),
             models.Index(fields=['compte_id', '-created_at'], name='idx_paie_tenant_date'),
@@ -1135,6 +1124,89 @@ class Paiement(AgenceScopedModel):
     def __str__(self):
         session_ref = self.session.reference if self.session else "sans session"
         return f"Paiement #{self.pk} ({session_ref}) - {self.montant}"
+
+
+class Depense(AgenceScopedModel):
+    """
+    Dépense opérationnelle rattachée à un contrat (panne, vidange,
+    entretien...). Purement informatif : n'a aucun impact sur les montants
+    financiers du contrat (montant_restant, montant_paye...).
+    """
+    CATEGORIE_PANNE = 'PANNE'
+    CATEGORIE_VIDANGE = 'VIDANGE'
+    CATEGORIE_ENTRETIEN = 'ENTRETIEN'
+    CATEGORIE_ASSURANCE = 'ASSURANCE'
+    CATEGORIE_AMENDE = 'AMENDE'
+    CATEGORIE_PIECE_DETACHEE = 'PIECE_DETACHEE'
+    CATEGORIE_CARBURANT = 'CARBURANT'
+    CATEGORIE_AUTRE = 'AUTRE'
+
+    CATEGORIE_CHOICES = [
+        (CATEGORIE_PANNE, 'Panne / réparation'),
+        (CATEGORIE_VIDANGE, 'Vidange'),
+        (CATEGORIE_ENTRETIEN, 'Entretien courant'),
+        (CATEGORIE_ASSURANCE, 'Assurance'),
+        (CATEGORIE_AMENDE, 'Amende'),
+        (CATEGORIE_PIECE_DETACHEE, 'Pièce détachée'),
+        (CATEGORIE_CARBURANT, 'Carburant'),
+        (CATEGORIE_AUTRE, 'Autre'),
+    ]
+
+    contrat = models.ForeignKey(
+        Contrat,
+        on_delete=models.PROTECT,
+        related_name='depenses',
+        help_text="Contrat concerné par cette dépense.",
+    )
+    categorie = models.CharField(max_length=20, choices=CATEGORIE_CHOICES)
+    libelle = models.CharField(max_length=255)
+    description = models.TextField(blank=True)
+    montant = models.DecimalField(
+        max_digits=12, decimal_places=2,
+        validators=[MinValueValidator(Decimal('0.01'))],
+    )
+    date_depense = models.DateField(
+        "Date de la dépense",
+        help_text="Date à laquelle la dépense a eu lieu (distincte de la date d'enregistrement).",
+    )
+    fournisseur = models.CharField(
+        "Fournisseur / prestataire",
+        max_length=255,
+        blank=True,
+    )
+    enregistre_par = models.ForeignKey(
+        CustomUser,
+        on_delete=models.PROTECT,
+        related_name='depenses_enregistrees',
+    )
+
+    def save(self, *args, **kwargs):
+        update_fields = kwargs.get('update_fields')
+        if update_fields is not None:
+            update_fields = set(update_fields)
+
+        # Propagation automatique de l'agence depuis le contrat, comme sur Paiement.
+        if not self.agence_id and self.contrat_id:
+            self.agence_id = self.contrat.agence_id
+            if update_fields is not None:
+                update_fields.add('agence')
+
+        if update_fields is not None:
+            kwargs['update_fields'] = list(update_fields)
+
+        super().save(*args, **kwargs)
+
+    class Meta:
+        db_table = "rc_depense"
+        verbose_name = "Dépense"
+        verbose_name_plural = "Dépenses"
+        indexes = [
+            models.Index(fields=['compte_id', '-date_depense'], name='idx_depense_tenant_date'),
+            models.Index(fields=['contrat'], name='idx_depense_contrat'),
+        ]
+
+    def __str__(self):
+        return f"{self.get_categorie_display()} - {self.libelle} ({self.montant} F)"
 
 
 class Parametre(BaseModel):

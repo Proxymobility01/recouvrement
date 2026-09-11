@@ -6,10 +6,12 @@ from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.paginator import Paginator
 from django.db import IntegrityError
-from django.db.models import Q
+from django.db.models import DecimalField, Q, Sum
+from django.db.models.functions import Coalesce
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 
+from core.filters import ContratFilter
 from frontend.mixins import permission_requise, queryset_tenant, querystring_sans_page
 from recouvrement.api.v1.serializers import ContratSerializer, SousContratSerializer
 from recouvrement.models import Agence, Contrat, Proprietaire, TypeContrat
@@ -120,17 +122,28 @@ def liste(request):
             | Q(nom_complet__icontains=recherche)
         )
 
-    statut = request.GET.get('statut', '')
-    if statut:
-        qs = qs.filter(statut=statut)
+    # Statut, type de contrat, agence, plages de dates (début/fin/prochaine
+    # échéance) et plages de montants : tous déjà supportés par ContratFilter
+    # (utilisé aussi par l'API), réutilisé ici tel quel.
+    qs = ContratFilter(request.GET, queryset=qs).qs
+
+    qs = qs.annotate(
+        montant_total_depenses=Coalesce(
+            Sum('depenses__montant'),
+            Decimal('0.00'),
+            output_field=DecimalField(max_digits=12, decimal_places=2),
+        ),
+    )
 
     page = Paginator(qs.order_by('-created_at'), 25).get_page(request.GET.get('page'))
 
     return render(request, 'frontend/contrats/list.html', {
         'page_obj': page,
         'recherche': recherche,
-        'statut': statut,
+        'filtres': request.GET,
         'statuts': Contrat.STATUT_CHOICES,
+        'types_contrat': queryset_tenant(TypeContrat, request.user).order_by('libelle'),
+        'agences': queryset_tenant(Agence, request.user).filter(actif=True).order_by('nom'),
         'querystring': querystring_sans_page(request),
     })
 
@@ -229,6 +242,10 @@ def detail(request, pk):
     sous_contrats = contrat.sous_contrats.select_related('type_contrat').order_by('id')
     leases = contrat.leases.order_by('-date_echeance')[:100]
     paiements = contrat.paiements.select_related('enregistre_par').order_by('-created_at')[:50]
+    depenses = contrat.depenses.order_by('-date_depense')[:50]
+    montant_total_depenses = contrat.depenses.aggregate(
+        total=Sum('montant'),
+    )['total'] or Decimal('0.00')
 
     # L'action annuler-leases/sous-contrats est routée sur ContratViewSet,
     # dont StrictDjangoModelPermissions calcule les perms depuis le modèle
@@ -240,10 +257,14 @@ def detail(request, pk):
         'sous_contrats': sous_contrats,
         'leases': leases,
         'paiements': paiements,
+        'depenses': depenses,
+        'montant_total_depenses': montant_total_depenses,
         'peut_modifier': request.user.has_perm('recouvrement.change_contrat'),
         'peut_ajouter_sous_contrat': peut_gerer_contrat,
         'peut_annuler_leases': peut_gerer_contrat,
         'peut_encaisser': request.user.has_perm('recouvrement.add_paiement'),
+        'peut_ajouter_depense': request.user.has_perm('recouvrement.add_depense'),
+        'peut_modifier_depense': request.user.has_perm('recouvrement.change_depense'),
     })
 
 

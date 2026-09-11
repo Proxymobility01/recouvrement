@@ -91,6 +91,11 @@ class KeycloakJWTAuthentication(JWTAuthentication):
                 algorithms=[settings.SIMPLE_JWT.get('ALGORITHM', 'RS256')],
                 audience=settings.SIMPLE_JWT.get('AUDIENCE'),
                 issuer=settings.SIMPLE_JWT.get('ISSUER'),
+                # Tolère un léger décalage d'horloge avec le serveur Keycloak
+                # (souvent une machine distincte) sur exp/iat/nbf : sans ça,
+                # la moindre dérive fait échouer 100% des connexions avec
+                # "The token is not yet valid (iat)".
+                leeway=settings.SIMPLE_JWT.get('LEEWAY', 0),
                 options={
                     "verify_aud": True if settings.SIMPLE_JWT.get('AUDIENCE') else False,
                     "verify_iss": True if settings.SIMPLE_JWT.get('ISSUER') else False,

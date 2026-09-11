@@ -4,6 +4,7 @@ from rest_framework.routers import DefaultRouter
 from recouvrement.api.v1.views import (
     AgenceViewSet,
     ContratViewSet,
+    DepenseViewSet,
     LeaseViewSet,
     InitiationPaiementView,
     InitiationPaiementUSSDView,
@@ -26,6 +27,7 @@ router.register(r'agences', AgenceViewSet, basename='agence')
 router.register(r'contrats', ContratViewSet, basename='contrat')
 router.register(r'leases', LeaseViewSet, basename='lease')
 router.register(r'paiements', PaiementViewSet, basename='paiement')
+router.register(r'depenses', DepenseViewSet, basename='depense')
 router.register(r'parametres', ParametreViewSet, basename='parametres')
 router.register(r'type-contrats', TypeContratViewSet, basename='type-contrats')
 router.register(r'regles-penalites', ReglePenaliteViewSet, basename='regle-penalite')

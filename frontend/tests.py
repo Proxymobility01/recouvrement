@@ -1,15 +1,16 @@
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from unittest.mock import patch
 
 from django.contrib.auth.models import Permission
 from django.test import TestCase
 from django.urls import reverse
+from django.utils import timezone
 
 from accounts.models import CustomUser, CustomUserRole, Role
 from core.tasks import paiement_task
 from recouvrement.models import (
-    Agence, CompteReceptionProprietaire, Contrat, Lease, Paiement,
+    Agence, CompteReceptionProprietaire, Contrat, Depense, Lease, Paiement,
     PreuvePaiementUSSD, Proprietaire, SessionPaiement, TypeContrat,
 )
 
@@ -38,6 +39,7 @@ class FrontendTestCase(TestCase):
             'view_comptereceptionproprietaire', 'add_comptereceptionproprietaire',
             'change_comptereceptionproprietaire',
             'view_typecontrat', 'add_typecontrat', 'change_typecontrat',
+            'view_depense', 'add_depense', 'change_depense',
         ))
 
         # Rôle "vérificateur USSD partiel" : peut voir les preuves mais pas
@@ -596,3 +598,262 @@ class SpecificitesContratTests(FrontendTestCase):
         )
         sous_contrat = self.contrat_a.sous_contrats.get()
         self.assertEqual(sous_contrat.specificites, {'imei': '123456789012345'})
+
+
+class DepenseFrontendTests(FrontendTestCase):
+    def test_creer_depense_avec_contrat_preselectionne(self):
+        self.client.force_login(self.admin_a)
+
+        # Le bouton "Nouvelle dépense" sur la fiche contrat pré-sélectionne
+        # le contrat via ?contrat=, comme "Encaisser" le fait avec ?lease=.
+        response = self.client.get(
+            reverse('frontend:depenses-creer') + f'?contrat={self.contrat_a.pk}'
+        )
+        self.assertContains(response, f'value="{self.contrat_a.pk}" selected')
+
+        response = self.client.post(reverse('frontend:depenses-creer'), {
+            'contrat': self.contrat_a.pk,
+            'categorie': Depense.CATEGORIE_VIDANGE,
+            'libelle': 'Vidange complète',
+            'montant': '15000.00',
+            'date_depense': '2026-02-01',
+            'fournisseur': 'Garage Test',
+        })
+        depense = Depense.objects.get(libelle='Vidange complète')
+        self.assertRedirects(
+            response, reverse('frontend:contrats-detail', args=[self.contrat_a.pk])
+        )
+        self.assertEqual(depense.compte_id, self.compte_a)
+        self.assertEqual(depense.agence_id, self.contrat_a.agence_id)
+        self.assertEqual(depense.enregistre_par_id, self.admin_a.pk)
+
+    def test_creation_refuse_un_contrat_dun_autre_compte(self):
+        self.client.force_login(self.admin_a)
+        response = self.client.post(reverse('frontend:depenses-creer'), {
+            'contrat': self.autre_contrat_pour_isolation().pk,
+            'categorie': Depense.CATEGORIE_PANNE,
+            'libelle': 'Tentative inter-comptes',
+            'montant': '10000.00',
+            'date_depense': '2026-02-01',
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(
+            Depense.objects.filter(libelle='Tentative inter-comptes').exists()
+        )
+
+    def autre_contrat_pour_isolation(self):
+        return Contrat.objects.create(
+            compte_id=self.compte_b, chauffeur=self.admin_b,
+            type_contrat=TypeContrat.objects.create(
+                compte_id=self.compte_b, libelle='Moto B', code='MOTO-B-DEP',
+                est_principal=True,
+            ),
+            nom_complet='Contrat B', immatriculation='B-001', vin='VINCOMPTEBDEP01',
+            montant_total=Decimal('50000.00'), montant_restant=Decimal('50000.00'),
+            montant_par_paiement=Decimal('2000.00'),
+            date_debut=date(2026, 1, 1), date_fin=date(2027, 1, 1),
+        )
+
+    def test_fiche_contrat_affiche_le_total_des_depenses(self):
+        Depense.objects.create(
+            compte_id=self.compte_a, contrat=self.contrat_a,
+            categorie=Depense.CATEGORIE_VIDANGE, libelle='Vidange 1',
+            montant=Decimal('15000.00'), date_depense=date(2026, 2, 1),
+            enregistre_par=self.admin_a,
+        )
+        Depense.objects.create(
+            compte_id=self.compte_a, contrat=self.contrat_a,
+            categorie=Depense.CATEGORIE_PANNE, libelle='Panne 1',
+            montant=Decimal('7500.00'), date_depense=date(2026, 2, 5),
+            enregistre_par=self.admin_a,
+        )
+
+        self.client.force_login(self.admin_a)
+        response = self.client.get(
+            reverse('frontend:contrats-detail', args=[self.contrat_a.pk])
+        )
+        self.assertContains(response, '22500,00 F')
+        self.assertContains(response, 'Vidange 1')
+        self.assertContains(response, 'Panne 1')
+
+    def test_modifier_depense(self):
+        depense = Depense.objects.create(
+            compte_id=self.compte_a, contrat=self.contrat_a,
+            categorie=Depense.CATEGORIE_VIDANGE, libelle='Vidange initiale',
+            montant=Decimal('15000.00'), date_depense=date(2026, 2, 1),
+            enregistre_par=self.admin_a,
+        )
+
+        self.client.force_login(self.admin_a)
+        response = self.client.post(
+            reverse('frontend:depenses-modifier', args=[depense.pk]),
+            {
+                'categorie': Depense.CATEGORIE_ENTRETIEN,
+                'libelle': 'Vidange corrigée',
+                'montant': '16000.00',
+                'date_depense': '2026-02-02',
+            },
+        )
+        self.assertRedirects(
+            response, reverse('frontend:contrats-detail', args=[self.contrat_a.pk])
+        )
+        depense.refresh_from_db()
+        self.assertEqual(depense.libelle, 'Vidange corrigée')
+        self.assertEqual(depense.montant, Decimal('16000.00'))
+        self.assertEqual(depense.categorie, Depense.CATEGORIE_ENTRETIEN)
+        # Le contrat n'est jamais exposé en modification : il reste inchangé.
+        self.assertEqual(depense.contrat_id, self.contrat_a.pk)
+
+    def test_isolation_tenant_sur_la_liste(self):
+        Depense.objects.create(
+            compte_id=self.compte_a, contrat=self.contrat_a,
+            categorie=Depense.CATEGORIE_VIDANGE, libelle='Dépense du compte A',
+            montant=Decimal('5000.00'), date_depense=date(2026, 2, 1),
+            enregistre_par=self.admin_a,
+        )
+        autre_contrat = self.autre_contrat_pour_isolation()
+        Depense.objects.create(
+            compte_id=self.compte_b, contrat=autre_contrat,
+            categorie=Depense.CATEGORIE_VIDANGE, libelle='Dépense du compte B',
+            montant=Decimal('5000.00'), date_depense=date(2026, 2, 1),
+            enregistre_par=self.admin_b,
+        )
+
+        self.client.force_login(self.admin_a)
+        response = self.client.get(reverse('frontend:depenses-liste'))
+        self.assertContains(response, 'Dépense du compte A')
+        self.assertNotContains(response, 'Dépense du compte B')
+
+
+class FiltresListesTests(FrontendTestCase):
+    """
+    Vérifie que les FilterSet du backend (core/filters.py), réutilisés tels
+    quels dans les vues frontend, filtrent effectivement les résultats — pas
+    seulement que la page se charge sans erreur.
+    """
+
+    def test_contrats_filtre_par_plage_de_date_debut(self):
+        contrat_hors_plage = Contrat.objects.create(
+            compte_id=self.compte_a, chauffeur=self.chauffeur_a2,
+            type_contrat=self.type_contrat_a, agence=self.agence_a,
+            proprietaire=self.proprietaire_a, nom_complet='Contrat hors plage',
+            immatriculation='FE-010-TT', vin='VINFILTRETEST01',
+            montant_total=Decimal('50000.00'), montant_restant=Decimal('50000.00'),
+            montant_par_paiement=Decimal('2000.00'),
+            date_debut=date(2020, 1, 1), date_fin=date(2021, 1, 1),
+        )
+
+        self.client.force_login(self.admin_a)
+        response = self.client.get(reverse('frontend:contrats-liste'), {
+            'date_debut_start': '2025-01-01', 'date_debut_end': '2026-12-31',
+        })
+        self.assertContains(response, self.contrat_a.reference)
+        self.assertNotContains(response, contrat_hors_plage.reference)
+
+    def test_contrats_liste_affiche_les_nouvelles_colonnes(self):
+        Depense.objects.create(
+            compte_id=self.compte_a, contrat=self.contrat_a,
+            categorie=Depense.CATEGORIE_VIDANGE, libelle='Vidange colonne',
+            montant=Decimal('4000.00'), date_depense=date(2026, 2, 1),
+            enregistre_par=self.admin_a,
+        )
+
+        self.client.force_login(self.admin_a)
+        response = self.client.get(reverse('frontend:contrats-liste'))
+        self.assertContains(response, '4000,00 F')
+
+    def test_leases_filtre_par_plage_de_date_echeance(self):
+        lease_hors_plage = Lease.objects.create(
+            compte_id=self.compte_a, agence=self.agence_a, contrat=self.contrat_a,
+            date_echeance='2020-01-15T08:00:00+01:00',
+            montant_attendu=Decimal('5000.00'),
+        )
+
+        self.client.force_login(self.admin_a)
+        response = self.client.get(reverse('frontend:leases-liste'), {
+            'date_echeance_start': '2026-01-01', 'date_echeance_end': '2026-12-31',
+        })
+        self.assertContains(response, self.lease_a.contrat.reference)
+        contenu = response.content.decode()
+        self.assertNotIn('15/01/2020', contenu)
+
+    def test_paiements_filtre_par_plage_de_montant(self):
+        Paiement.objects.create(
+            compte_id=self.compte_a, agence=self.agence_a, contrat=self.contrat_a,
+            lease=self.lease_a, enregistre_par=self.admin_a,
+            montant=Decimal('500.00'), methode=Paiement.METHODE_ESPECES,
+            statut=Paiement.STATUT_VALIDE,
+        )
+        Paiement.objects.create(
+            compte_id=self.compte_a, agence=self.agence_a, contrat=self.contrat_a,
+            lease=self.lease_a, enregistre_par=self.admin_a,
+            montant=Decimal('9000.00'), methode=Paiement.METHODE_ESPECES,
+            statut=Paiement.STATUT_VALIDE,
+        )
+
+        self.client.force_login(self.admin_a)
+        response = self.client.get(reverse('frontend:paiements-liste'), {
+            'montant_min': '8000',
+        })
+        contenu = response.content.decode()
+        self.assertIn('9000,00 F', contenu)
+        self.assertNotIn('500,00 F', contenu)
+
+    def test_depenses_filtre_par_contrat(self):
+        autre_contrat = Contrat.objects.create(
+            compte_id=self.compte_a, chauffeur=self.chauffeur_a2,
+            type_contrat=self.type_contrat_a, agence=self.agence_a,
+            proprietaire=self.proprietaire_a, nom_complet='Autre contrat dépense',
+            immatriculation='FE-011-TT', vin='VINFILTRETEST02',
+            montant_total=Decimal('50000.00'), montant_restant=Decimal('50000.00'),
+            montant_par_paiement=Decimal('2000.00'),
+            date_debut=date(2026, 1, 1), date_fin=date(2027, 1, 1),
+        )
+        Depense.objects.create(
+            compte_id=self.compte_a, contrat=self.contrat_a,
+            categorie=Depense.CATEGORIE_VIDANGE, libelle='Dépense contrat A',
+            montant=Decimal('3000.00'), date_depense=date(2026, 2, 1),
+            enregistre_par=self.admin_a,
+        )
+        Depense.objects.create(
+            compte_id=self.compte_a, contrat=autre_contrat,
+            categorie=Depense.CATEGORIE_VIDANGE, libelle='Dépense autre contrat',
+            montant=Decimal('3000.00'), date_depense=date(2026, 2, 1),
+            enregistre_par=self.admin_a,
+        )
+
+        self.client.force_login(self.admin_a)
+        response = self.client.get(reverse('frontend:depenses-liste'), {
+            'contrat_id': self.contrat_a.pk,
+        })
+        self.assertContains(response, 'Dépense contrat A')
+        self.assertNotContains(response, 'Dépense autre contrat')
+
+    def test_transactions_filtre_par_plage_de_date_validation(self):
+        session_recente = SessionPaiement.objects.create(
+            compte_id=self.compte_a, agence=self.agence_a,
+            reference='USSD.FILTRETEST.RECENT', canal=SessionPaiement.CANAL_USSD_ASSISTE,
+            montant_total=Decimal('5000.00'), telephone='237677000002',
+            utilisateur=self.chauffeur_a, proprietaire=self.proprietaire_a,
+            compte_reception=self.compte_reception_a, operateur='ORANGE',
+            numero_destinataire=self.compte_reception_a.numero,
+            statut=SessionPaiement.STATUT_VALIDE,
+            date_validation=timezone.make_aware(datetime(2026, 6, 1, 8, 0)),
+        )
+        session_ancienne = SessionPaiement.objects.create(
+            compte_id=self.compte_a, agence=self.agence_a,
+            reference='USSD.FILTRETEST.ANCIEN', canal=SessionPaiement.CANAL_USSD_ASSISTE,
+            montant_total=Decimal('5000.00'), telephone='237677000003',
+            utilisateur=self.chauffeur_a, proprietaire=self.proprietaire_a,
+            compte_reception=self.compte_reception_a, operateur='ORANGE',
+            numero_destinataire=self.compte_reception_a.numero,
+            statut=SessionPaiement.STATUT_VALIDE,
+            date_validation=timezone.make_aware(datetime(2020, 1, 1, 8, 0)),
+        )
+
+        self.client.force_login(self.admin_a)
+        response = self.client.get(reverse('frontend:transactions-liste'), {
+            'date_validation_start': '2026-01-01', 'date_validation_end': '2026-12-31',
+        })
+        self.assertContains(response, session_recente.reference)
+        self.assertNotContains(response, session_ancienne.reference)

@@ -1,7 +1,7 @@
 from django.urls import path
 
 from frontend.views import (
-    auth, chauffeurs, contrats, leases, paiements, proprietaires, transactions, types_contrat,
+    auth, chauffeurs, contrats, depenses, leases, paiements, proprietaires, transactions, types_contrat,
 )
 
 app_name = 'frontend'
@@ -27,6 +27,10 @@ urlpatterns = [
     path('paiements/', paiements.liste, name='paiements-liste'),
     path('paiements/nouveau/', paiements.creer, name='paiements-creer'),
     path('paiements/<int:pk>/modifier/', paiements.modifier, name='paiements-modifier'),
+
+    path('depenses/', depenses.liste, name='depenses-liste'),
+    path('depenses/nouvelle/', depenses.creer, name='depenses-creer'),
+    path('depenses/<int:pk>/modifier/', depenses.modifier, name='depenses-modifier'),
 
     path('chauffeurs/', chauffeurs.liste, name='chauffeurs-liste'),
     path('chauffeurs/nouveau/', chauffeurs.creer, name='chauffeurs-creer'),

@@ -1,0 +1,74 @@
+<div class="modal-header">
+  <h5 class="modal-title">{% if depense %}Modifier la dépense{% else %}Nouvelle dépense{% endif %}</h5>
+  <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fermer"></button>
+</div>
+<form method="post" action="{% if depense %}{% url 'frontend:depenses-modifier' depense.pk %}{% else %}{% url 'frontend:depenses-creer' %}{% endif %}">
+  {% csrf_token %}
+  <div class="modal-body">
+    <div class="row g-3">
+      {% if depense %}
+      <div class="col-12">
+        <p class="mb-0"><strong>Contrat :</strong> {{ depense.contrat.reference }} — {{ depense.contrat.nom_complet }}</p>
+      </div>
+      {% else %}
+      <div class="col-12">
+        <label class="form-label">Contrat</label>
+        <select name="contrat" class="form-select" required>
+          <option value="">— Sélectionner —</option>
+          {% for c in contrats %}
+            <option value="{{ c.pk }}" {% if valeurs.contrat == c.pk|stringformat:"s" %}selected{% endif %}>{{ c.reference }} — {{ c.nom_complet }}</option>
+          {% endfor %}
+        </select>
+        {% if erreurs.contrat %}<div class="text-danger small">{{ erreurs.contrat.0 }}</div>{% endif %}
+      </div>
+      {% endif %}
+
+      <div class="col-md-6">
+        <label class="form-label">Catégorie</label>
+        <select name="categorie" class="form-select" required>
+          <option value="">— Sélectionner —</option>
+          {% for code, libelle in categories %}
+            <option value="{{ code }}" {% if valeurs.categorie == code %}selected{% endif %}>{{ libelle }}</option>
+          {% endfor %}
+        </select>
+        {% if erreurs.categorie %}<div class="text-danger small">{{ erreurs.categorie.0 }}</div>{% endif %}
+      </div>
+      <div class="col-md-6">
+        <label class="form-label">Montant (F)</label>
+        <input type="number" step="0.01" name="montant" class="form-control" value="{{ valeurs.montant|default:'' }}" required>
+        {% if erreurs.montant %}<div class="text-danger small">{{ erreurs.montant.0 }}</div>{% endif %}
+      </div>
+
+      <div class="col-12">
+        <label class="form-label">Libellé</label>
+        <input type="text" name="libelle" class="form-control" value="{{ valeurs.libelle|default:'' }}" placeholder="Ex : Vidange complète + filtre à huile" required>
+        {% if erreurs.libelle %}<div class="text-danger small">{{ erreurs.libelle.0 }}</div>{% endif %}
+      </div>
+
+      <div class="col-12">
+        <label class="form-label">Description</label>
+        <textarea name="description" class="form-control" rows="2">{{ valeurs.description|default:'' }}</textarea>
+        {% if erreurs.description %}<div class="text-danger small">{{ erreurs.description.0 }}</div>{% endif %}
+      </div>
+
+      <div class="col-md-6">
+        <label class="form-label">Date de la dépense</label>
+        <input type="date" name="date_depense" class="form-control" value="{{ valeurs.date_depense|default:'' }}" required>
+        {% if erreurs.date_depense %}<div class="text-danger small">{{ erreurs.date_depense.0 }}</div>{% endif %}
+      </div>
+      <div class="col-md-6">
+        <label class="form-label">Fournisseur / prestataire</label>
+        <input type="text" name="fournisseur" class="form-control" value="{{ valeurs.fournisseur|default:'' }}">
+        {% if erreurs.fournisseur %}<div class="text-danger small">{{ erreurs.fournisseur.0 }}</div>{% endif %}
+      </div>
+    </div>
+
+    {% if erreurs.non_field_errors %}
+      <div class="alert alert-danger mt-3 mb-0">{{ erreurs.non_field_errors.0 }}</div>
+    {% endif %}
+  </div>
+  <div class="modal-footer">
+    <button type="button" class="btn btn-link" data-bs-dismiss="modal">Annuler</button>
+    <button type="submit" class="btn btn-primary">Enregistrer</button>
+  </div>
+</form>

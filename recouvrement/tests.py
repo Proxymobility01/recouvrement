@@ -42,6 +42,7 @@ from recouvrement.models import (
     Agence,
     CompteReceptionProprietaire,
     Contrat,
+    Depense,
     Lease,
     Parametre,
     Paiement,
@@ -55,6 +56,7 @@ from recouvrement.models import (
 from recouvrement.api.v1.views import (
     AgenceViewSet,
     ContratViewSet,
+    DepenseViewSet,
     InitiationPaiementView,
     InitiationPaiementUSSDView,
     LeaseViewSet,
@@ -69,6 +71,7 @@ from recouvrement.api.v1.serializers import (
     AgenceSerializer,
     CalendrierSerializer,
     ContratSerializer,
+    DepenseSerializer,
     LeaseSerializer,
     PaiementSerializer,
     PenaliteSerializer,
@@ -614,7 +617,12 @@ class PaiementUSSDAssisteTests(TestCase):
         self.assertIn('Aucun compte MTN actif', response.data['dev_message'])
         self.assertFalse(SessionPaiement.objects.exists())
 
-    def test_un_second_paiement_ussd_du_meme_lease_est_refuse(self):
+    def test_un_second_paiement_ussd_du_meme_lease_est_autorise(self):
+        # Le chauffeur doit pouvoir relancer un paiement même si une
+        # tentative précédente sur la même échéance est restée EN_ATTENTE
+        # (ex : erreur, SMS jamais soumis) — tant que l'échéance elle-même
+        # n'est pas soldée, aucun verrou ne doit bloquer une nouvelle
+        # tentative.
         premiere_reponse = self._initier([
             (self.lease, Decimal('3500.00')),
         ])
@@ -623,12 +631,16 @@ class PaiementUSSDAssisteTests(TestCase):
         ])
 
         self.assertEqual(premiere_reponse.status_code, 201)
-        self.assertEqual(seconde_reponse.status_code, 400)
-        self.assertIn(
-            'déjà en cours',
-            seconde_reponse.data['dev_message'],
+        self.assertEqual(seconde_reponse.status_code, 201)
+        self.assertEqual(SessionPaiement.objects.count(), 2)
+        self.assertEqual(
+            Paiement.objects.filter(
+                lease=self.lease,
+                methode=Paiement.METHODE_USSD_ASSISTE,
+                statut=Paiement.STATUT_EN_ATTENTE,
+            ).count(),
+            2,
         )
-        self.assertEqual(SessionPaiement.objects.count(), 1)
 
     def test_soumission_met_en_verification_sans_payer_le_lease(self):
         initiation = self._initier([
@@ -1645,7 +1657,7 @@ class AdministrationIdCompteTests(SimpleTestCase):
             )
         ]
 
-        self.assertEqual(len(admins_concernes), 16)
+        self.assertEqual(len(admins_concernes), 17)
         for model_admin in admins_concernes:
             list_display = tuple(model_admin.list_display)
             self.assertEqual(
@@ -3130,3 +3142,265 @@ class GenerationLeasesTests(TestCase):
             Lease.objects.filter(contrat=self.contrat).count(),
             1,
         )
+
+
+class DepenseAPITests(TestCase):
+    compte_id = 95
+    autre_compte_id = 96
+
+    def setUp(self):
+        self.admin = CustomUser.objects.create(
+            keycloak_id='admin-depense', compte_id=self.compte_id,
+            nom_complet='Admin Dépenses', is_active=True,
+        )
+        self._autoriser(self.admin, [
+            'add_depense', 'view_depense', 'change_depense',
+        ])
+
+        self.sans_droits = CustomUser.objects.create(
+            keycloak_id='sans-droits-depense', compte_id=self.compte_id,
+            nom_complet='Sans Droits', is_active=True,
+        )
+
+        self.chauffeur = CustomUser.objects.create(
+            keycloak_id='chauffeur-depense', compte_id=self.compte_id,
+            nom_complet='Chauffeur Dépense', is_active=True,
+        )
+        self.type_contrat = TypeContrat.objects.create(
+            compte_id=self.compte_id, libelle='Moto Dépense',
+            code='MOTO-DEPENSE', est_principal=True,
+        )
+        self.proprietaire = Proprietaire.objects.create(
+            compte_id=self.compte_id, nom_complet='Propriétaire Dépense',
+        )
+        self.agence = Agence.objects.create(
+            compte_id=self.compte_id, nom='Agence Dépense', code='AG-DEPENSE',
+        )
+        self.contrat = Contrat.objects.create(
+            compte_id=self.compte_id, chauffeur=self.chauffeur,
+            type_contrat=self.type_contrat, agence=self.agence,
+            proprietaire=self.proprietaire, nom_complet=self.chauffeur.nom_complet,
+            immatriculation='DEP-001', vin='VINDEPENSETEST01',
+            montant_total=Decimal('100000.00'), montant_restant=Decimal('100000.00'),
+            montant_par_paiement=Decimal('5000.00'),
+            date_debut=date(2026, 1, 1), date_fin=date(2027, 1, 1),
+        )
+
+        self.contrat_autre_compte = Contrat.objects.create(
+            compte_id=self.autre_compte_id,
+            chauffeur=CustomUser.objects.create(
+                keycloak_id='chauffeur-depense-autre', compte_id=self.autre_compte_id,
+                nom_complet='Chauffeur Autre Compte', is_active=True,
+            ),
+            type_contrat=TypeContrat.objects.create(
+                compte_id=self.autre_compte_id, libelle='Moto Autre',
+                code='MOTO-AUTRE-DEPENSE', est_principal=True,
+            ),
+            nom_complet='Contrat Autre Compte',
+            immatriculation='DEP-002', vin='VINDEPENSETEST02',
+            montant_total=Decimal('50000.00'), montant_restant=Decimal('50000.00'),
+            montant_par_paiement=Decimal('2000.00'),
+            date_debut=date(2026, 1, 1), date_fin=date(2027, 1, 1),
+        )
+
+        # Compte technique superuser, sans rapport avec le compte_id des
+        # partenaires : reproduit le compte d'administration réel utilisé
+        # pour les opérations transverses (compte_id arbitraire, 1 ici).
+        self.superuser = CustomUser.objects.create(
+            keycloak_id='superuser-depense', compte_id=1,
+            nom_complet='Super Administrateur', is_active=True, is_superuser=True,
+        )
+
+    def _autoriser(self, utilisateur, codenames):
+        role = Role.objects.create(
+            libelle=f'Rôle test dépense {utilisateur.pk}',
+            slug=f'TEST_DEPENSE_{utilisateur.pk}',
+        )
+        role.permissions.add(*[
+            Permission.objects.get(
+                content_type__app_label='recouvrement', codename=codename,
+            )
+            for codename in codenames
+        ])
+        CustomUserRole.objects.create(
+            compte_id=utilisateur.compte_id, user=utilisateur, role=role, actif=True,
+        )
+        utilisateur._perm_cache = set(codenames)
+
+    def _creer_depense(self, contrat=None, **overrides):
+        donnees = {
+            'compte_id': self.compte_id,
+            'contrat': contrat or self.contrat,
+            'categorie': Depense.CATEGORIE_VIDANGE,
+            'libelle': 'Vidange complète',
+            'montant': Decimal('15000.00'),
+            'date_depense': date(2026, 2, 1),
+            'enregistre_par': self.admin,
+        }
+        donnees.update(overrides)
+        return Depense.objects.create(**donnees)
+
+    def _vue_liste_creation(self):
+        return DepenseViewSet.as_view({'get': 'list', 'post': 'create'})
+
+    def test_creation_via_api_propage_compte_et_agence(self):
+        request = APIRequestFactory().post('/api/v1/depenses/', {
+            'contrat': self.contrat.id,
+            'categorie': Depense.CATEGORIE_PANNE,
+            'libelle': 'Réparation moteur',
+            'montant': '25000.00',
+            'date_depense': '2026-02-10',
+            'fournisseur': 'Garage Moto Plus',
+        }, format='json')
+        force_authenticate(request, user=self.admin)
+
+        response = self._vue_liste_creation()(request)
+
+        self.assertEqual(response.status_code, 201, response.data)
+        depense = Depense.objects.get(libelle='Réparation moteur')
+        self.assertEqual(depense.compte_id, self.compte_id)
+        self.assertEqual(depense.agence_id, self.contrat.agence_id)
+        self.assertEqual(depense.enregistre_par_id, self.admin.pk)
+
+    def test_superuser_peut_creer_une_depense_sur_le_contrat_dun_partenaire(self):
+        # Régression : le superuser a son propre compte_id technique (1),
+        # sans rapport avec celui des partenaires. Même s'il fournit (par
+        # erreur ou habitude) SON PROPRE compte_id, la dépense doit malgré
+        # tout être rattachée au compte_id du CONTRAT choisi (celui du
+        # partenaire), jamais à celui de l'utilisateur connecté.
+        request = APIRequestFactory().post('/api/v1/depenses/', {
+            'contrat': self.contrat.id,
+            'categorie': Depense.CATEGORIE_VIDANGE,
+            'libelle': 'Vidange par le superuser',
+            'montant': '12000.00',
+            'date_depense': '2026-02-10',
+            'compte_id': self.superuser.compte_id,
+        }, format='json')
+        force_authenticate(request, user=self.superuser)
+
+        response = self._vue_liste_creation()(request)
+
+        self.assertEqual(response.status_code, 201, response.data)
+        depense = Depense.objects.get(libelle='Vidange par le superuser')
+        self.assertEqual(depense.compte_id, self.compte_id)
+        self.assertNotEqual(depense.compte_id, self.superuser.compte_id)
+        self.assertEqual(depense.agence_id, self.contrat.agence_id)
+
+    def test_creation_refuse_un_contrat_dun_autre_compte(self):
+        request = APIRequestFactory().post('/api/v1/depenses/', {
+            'contrat': self.contrat_autre_compte.id,
+            'categorie': Depense.CATEGORIE_PANNE,
+            'libelle': 'Tentative inter-comptes',
+            'montant': '10000.00',
+            'date_depense': '2026-02-10',
+        }, format='json')
+        force_authenticate(request, user=self.admin)
+
+        response = self._vue_liste_creation()(request)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('contrat', response.data['dev_message'])
+        self.assertFalse(
+            Depense.objects.filter(libelle='Tentative inter-comptes').exists()
+        )
+
+    def test_creation_sans_permission_est_refusee(self):
+        request = APIRequestFactory().post('/api/v1/depenses/', {
+            'contrat': self.contrat.id,
+            'categorie': Depense.CATEGORIE_PANNE,
+            'libelle': 'Sans droits',
+            'montant': '10000.00',
+            'date_depense': '2026-02-10',
+        }, format='json')
+        force_authenticate(request, user=self.sans_droits)
+
+        response = self._vue_liste_creation()(request)
+
+        self.assertEqual(response.status_code, 403)
+
+    def test_liste_filtree_par_contrat_et_categorie(self):
+        self._creer_depense(categorie=Depense.CATEGORIE_VIDANGE, libelle='Vidange 1')
+        self._creer_depense(categorie=Depense.CATEGORIE_PANNE, libelle='Panne 1')
+        self._creer_depense(
+            contrat=self.contrat_autre_compte, compte_id=self.autre_compte_id,
+            categorie=Depense.CATEGORIE_VIDANGE, libelle='Vidange autre compte',
+        )
+
+        request = APIRequestFactory().get(
+            f'/api/v1/depenses/?contrat_id={self.contrat.id}&categorie=VIDANGE'
+        )
+        force_authenticate(request, user=self.admin)
+
+        response = self._vue_liste_creation()(request)
+        resultats = response.data.get('results', response.data)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(resultats), 1)
+        self.assertEqual(resultats[0]['libelle'], 'Vidange 1')
+
+    def test_liste_isolee_par_tenant(self):
+        self._creer_depense(libelle='Dépense du compte')
+        self._creer_depense(
+            contrat=self.contrat_autre_compte, compte_id=self.autre_compte_id,
+            libelle='Dépense autre compte',
+        )
+
+        request = APIRequestFactory().get('/api/v1/depenses/')
+        force_authenticate(request, user=self.admin)
+
+        response = self._vue_liste_creation()(request)
+        libelles = [d['libelle'] for d in response.data.get('results', response.data)]
+
+        self.assertIn('Dépense du compte', libelles)
+        self.assertNotIn('Dépense autre compte', libelles)
+
+    def test_liste_contrats_expose_le_montant_total_des_depenses(self):
+        self._creer_depense(montant=Decimal('15000.00'))
+        self._creer_depense(montant=Decimal('7500.00'), categorie=Depense.CATEGORIE_PANNE)
+
+        autre_chauffeur = CustomUser.objects.create(
+            keycloak_id='chauffeur-depense-2', compte_id=self.compte_id,
+            nom_complet='Chauffeur Dépense 2', is_active=True,
+        )
+        autre_contrat = Contrat.objects.create(
+            compte_id=self.compte_id, chauffeur=autre_chauffeur,
+            type_contrat=self.type_contrat, agence=self.agence,
+            proprietaire=self.proprietaire, nom_complet='Contrat sans dépense',
+            immatriculation='DEP-003', vin='VINDEPENSETEST03',
+            montant_total=Decimal('40000.00'), montant_restant=Decimal('40000.00'),
+            montant_par_paiement=Decimal('2000.00'),
+            date_debut=date(2026, 1, 1), date_fin=date(2027, 1, 1),
+        )
+
+        role_contrats = Role.objects.create(
+            libelle='Consultation contrats dépense', slug='TEST_VIEW_CONTRATS_DEPENSE',
+        )
+        role_contrats.permissions.add(
+            Permission.objects.get(
+                content_type__app_label='recouvrement',
+                codename='view_all_contrats',
+            ),
+            Permission.objects.get(
+                content_type__app_label='recouvrement', codename='view_contrat',
+            ),
+        )
+        CustomUserRole.objects.create(
+            compte_id=self.compte_id, user=self.admin, role=role_contrats, actif=True,
+        )
+        self.admin._perm_cache = {
+            'add_depense', 'view_depense', 'change_depense',
+            'view_all_contrats', 'view_contrat',
+        }
+
+        request = APIRequestFactory().get('/api/v1/contrats/')
+        force_authenticate(request, user=self.admin)
+
+        response = ContratViewSet.as_view({'get': 'list'})(request)
+        resultats = {
+            c['id']: c['montant_total_depenses']
+            for c in response.data.get('results', response.data)
+        }
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(Decimal(resultats[self.contrat.id]), Decimal('22500.00'))
+        self.assertEqual(Decimal(resultats[autre_contrat.id]), Decimal('0.00'))

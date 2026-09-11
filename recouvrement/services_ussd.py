@@ -13,11 +13,6 @@ from core.utils import format_phone_cm
 class PaiementUSSDService:
     """Orchestre l'initiation et la soumission d'une preuve USSD."""
 
-    STATUTS_SESSION_BLOQUANTS = (
-        'EN_ATTENTE',
-        'EN_VERIFICATION',
-    )
-
     @staticmethod
     def _erreur(
         message,
@@ -182,25 +177,13 @@ class PaiementUSSDService:
                         f"le propriétaire {proprietaire.nom_complet}."
                     )
 
-                paiements_bloquants = set(
-                    Paiement.objects.filter(
-                        lease_id__in=lease_ids,
-                        methode=Paiement.METHODE_USSD_ASSISTE,
-                        statut=Paiement.STATUT_EN_ATTENTE,
-                        est_annule=False,
-                        session__canal=SessionPaiement.CANAL_USSD_ASSISTE,
-                        session__statut__in=cls.STATUTS_SESSION_BLOQUANTS,
-                    ).values_list('lease_id', flat=True)
-                )
-                if paiements_bloquants:
-                    ids = ', '.join(
-                        str(lease_id)
-                        for lease_id in sorted(paiements_bloquants)
-                    )
-                    cls._erreur(
-                        "Un paiement USSD est déjà en cours ou en "
-                        f"vérification pour les échéances : {ids}."
-                    )
+                # Volontairement PAS de blocage sur un paiement USSD déjà
+                # EN_ATTENTE/EN_VERIFICATION pour la même échéance : tant que
+                # le lease lui-même n'est pas soldé (cf. la boucle
+                # ci-dessous), le chauffeur doit pouvoir relancer un nouveau
+                # paiement à tout moment (ex : une précédente tentative
+                # restée bloquée suite à une erreur ne doit jamais l'empêcher
+                # de payer).
 
                 for lease in leases:
                     if lease.statut in (

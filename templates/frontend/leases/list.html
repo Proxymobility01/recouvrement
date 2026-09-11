@@ -3,19 +3,39 @@
 {% block content %}
 <h1 class="h3 mb-3">Échéances</h1>
 
-<form method="get" class="row g-2 mb-3">
+<form method="get" class="row g-2 mb-3 align-items-end">
   <div class="col-auto">
+    <label class="form-label small mb-0">Recherche</label>
     <input type="text" name="q" value="{{ recherche }}" class="form-control" placeholder="Chauffeur, référence...">
   </div>
   <div class="col-auto">
+    <label class="form-label small mb-0">Statut</label>
     <select name="statut" class="form-select">
-      <option value="">Tous les statuts</option>
+      <option value="">Tous</option>
       {% for code, libelle in statuts %}
-        <option value="{{ code }}" {% if code == statut %}selected{% endif %}>{{ libelle }}</option>
+        <option value="{{ code }}" {% if code == filtres.statut %}selected{% endif %}>{{ libelle }}</option>
       {% endfor %}
     </select>
   </div>
+  <div class="col-auto">
+    <label class="form-label small mb-0">Agence</label>
+    <select name="agence_id" class="form-select">
+      <option value="">Toutes</option>
+      {% for a in agences %}
+        <option value="{{ a.pk }}" {% if filtres.agence_id == a.pk|stringformat:"s" %}selected{% endif %}>{{ a.nom }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="col-auto">
+    <label class="form-label small mb-0">Date d'échéance</label>
+    <div class="d-flex align-items-center gap-1">
+      <input type="date" name="date_echeance_start" value="{{ filtres.date_echeance_start }}" class="form-control form-control-sm">
+      <span class="text-muted small">→</span>
+      <input type="date" name="date_echeance_end" value="{{ filtres.date_echeance_end }}" class="form-control form-control-sm">
+    </div>
+  </div>
   <div class="col-auto"><button class="btn btn-outline-secondary" type="submit">Filtrer</button></div>
+  <div class="col-auto"><a href="{% url 'frontend:leases-liste' %}" class="btn btn-link">Réinitialiser</a></div>
 </form>
 
 <table class="table table-striped bg-white">

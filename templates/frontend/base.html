@@ -26,6 +26,9 @@
         {% endif %}
         <li class="nav-item"><a class="nav-link" href="{% url 'frontend:leases-liste' %}">Échéances</a></li>
         <li class="nav-item"><a class="nav-link" href="{% url 'frontend:paiements-liste' %}">Paiements</a></li>
+        {% if perms.recouvrement.view_depense %}
+          <li class="nav-item"><a class="nav-link" href="{% url 'frontend:depenses-liste' %}">Dépenses</a></li>
+        {% endif %}
         {% if perms.accounts.view_customuser %}
           <li class="nav-item"><a class="nav-link" href="{% url 'frontend:chauffeurs-liste' %}">Chauffeurs</a></li>
         {% endif %}

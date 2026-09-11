@@ -10,8 +10,9 @@ from django_q.models import Schedule, Task
 from django_q.tasks import async_task
 from django.utils.dateparse import parse_datetime
 from django.db import transaction, DatabaseError, IntegrityError
-from django.db.models import Exists, OuterRef, Q, Prefetch
+from django.db.models import DecimalField, Exists, OuterRef, Q, Prefetch, Sum
 from django.db.models.deletion import ProtectedError
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import filters, mixins, status, viewsets
@@ -20,8 +21,8 @@ from rest_framework.generics import GenericAPIView
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from core.filters import LeaseFilter, ContratFilter, PaiementFilter, PenaliteFilter, ReglePenaliteFilter, \
-    SessionPaiementFilter, PreuvePaiementUSSDFilter, CompteReceptionProprietaireFilter
+from core.filters import LeaseFilter, ContratFilter, DepenseFilter, PaiementFilter, PenaliteFilter, \
+    ReglePenaliteFilter, SessionPaiementFilter, PreuvePaiementUSSDFilter, CompteReceptionProprietaireFilter
 from core.pagination import StandardResultsSetPagination
 from core.permissions import (
     CanAssignRuleToContracts,
@@ -33,14 +34,14 @@ from core.utils import format_phone_cm
 from core.api.v1.views import TenantModelViewSet
 from core.exceptions import CustomAPIException
 from core.errors import ErrorCodes
-from .serializers import AgenceSerializer, ContratSerializer, LeaseSerializer, InitiationPaiementSerializer, \
-    InitiationPaiementUSSDSerializer, SoumissionPreuvePaiementUSSDSerializer, PaiementSerializer, \
-    CalendrierSerializer, TypeContratSerializer, SousContratSerializer, ParametreSerializer, ReglePenaliteSerializer, \
-    PenaliteSerializer, SessionPaiementSerializer, AssignerRegleSerializer, AnnulerLeasesSerializer, \
-    RegleGenerationLeaseSerializer, ProprietaireSerializer, CompteReceptionProprietaireSerializer, \
-    PreuvePaiementUSSDSerializer, RejeterPreuveUSSDSerializer
-from ...models import Agence, Contrat, Paiement, Lease, SessionPaiement, TypeContrat, Parametre, ReglePenalite, Penalite, \
-    RegleGenerationLease, Proprietaire, CompteReceptionProprietaire, PreuvePaiementUSSD
+from .serializers import AgenceSerializer, ContratSerializer, DepenseSerializer, LeaseSerializer, \
+    InitiationPaiementSerializer, InitiationPaiementUSSDSerializer, SoumissionPreuvePaiementUSSDSerializer, \
+    PaiementSerializer, CalendrierSerializer, TypeContratSerializer, SousContratSerializer, ParametreSerializer, \
+    ReglePenaliteSerializer, PenaliteSerializer, SessionPaiementSerializer, AssignerRegleSerializer, \
+    AnnulerLeasesSerializer, RegleGenerationLeaseSerializer, ProprietaireSerializer, \
+    CompteReceptionProprietaireSerializer, PreuvePaiementUSSDSerializer, RejeterPreuveUSSDSerializer
+from ...models import Agence, Contrat, Depense, Paiement, Lease, SessionPaiement, TypeContrat, Parametre, \
+    ReglePenalite, Penalite, RegleGenerationLease, Proprietaire, CompteReceptionProprietaire, PreuvePaiementUSSD
 from ...services import PaymentService, annuler_leases_et_prolonger, AnnulationLeaseError
 from ...services_ussd import PaiementUSSDService
 from core.tasks import _schedule_next_verification
@@ -248,6 +249,12 @@ class ContratViewSet(TenantModelViewSet):
         qs = super().get_queryset().select_related(
             'chauffeur', 'enregistre_par', 'type_contrat', 'agence',
             'proprietaire',
+        ).annotate(
+            montant_total_depenses=Coalesce(
+                Sum('depenses__montant'),
+                Decimal('0.00'),
+                output_field=DecimalField(max_digits=12, decimal_places=2),
+            ),
         )
         user = self.request.user
 
@@ -1211,6 +1218,33 @@ class PaiementViewSet(TenantModelViewSet):
             status_code=403,
             dev_message=f"Hard-delete refusé sur l'entité Paiement ID: {instance.id} (Règle d'audit financier)."
         )
+
+
+class DepenseViewSet(TenantModelViewSet):
+    """
+    API pour l'enregistrement des dépenses opérationnelles liées à un
+    contrat (panne, vidange, entretien...). Purement informatif : n'a aucun
+    impact sur les montants financiers du contrat.
+    """
+    queryset = Depense.objects.all()
+    serializer_class = DepenseSerializer
+    permission_classes = [IsAuthenticated, StrictDjangoModelPermissions]
+    pagination_class = StandardResultsSetPagination
+    filter_backends = [DjangoFilterBackend, filters.OrderingFilter, filters.SearchFilter]
+    filterset_class = DepenseFilter
+    search_fields = [
+        'libelle', 'description', 'fournisseur', 'contrat__reference',
+    ]
+    ordering_fields = ['date_depense', 'montant', 'created_at']
+    ordering = ['-date_depense']
+
+    def get_queryset(self):
+        return super().get_queryset().select_related('contrat', 'agence', 'enregistre_par')
+
+    def perform_create(self, serializer):
+        serializer.validated_data['enregistre_par'] = self.request.user
+        super().perform_create(serializer)
+
 
 class TypeContratViewSet(TenantModelViewSet):
     """

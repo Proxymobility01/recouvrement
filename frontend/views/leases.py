@@ -2,8 +2,9 @@ from django.core.paginator import Paginator
 from django.db.models import Q
 from django.shortcuts import render
 
+from core.filters import LeaseFilter
 from frontend.mixins import permission_requise, queryset_tenant, querystring_sans_page
-from recouvrement.models import Lease
+from recouvrement.models import Agence, Lease
 
 
 def _leases_accessibles(user):
@@ -20,9 +21,9 @@ def liste(request):
     """Lecture seule, comme LeaseViewSet : aucune création/modification de lease ici."""
     qs = _leases_accessibles(request.user)
 
-    statut = request.GET.get('statut', '')
-    if statut:
-        qs = qs.filter(statut=statut)
+    # Statut, agence et plage de date d'échéance : déjà supportés par
+    # LeaseFilter (utilisé aussi par l'API), réutilisé ici tel quel.
+    qs = LeaseFilter(request.GET, queryset=qs).qs
 
     recherche = request.GET.get('q', '').strip()
     if recherche:
@@ -34,8 +35,9 @@ def liste(request):
 
     return render(request, 'frontend/leases/list.html', {
         'page_obj': page,
-        'statut': statut,
         'recherche': recherche,
+        'filtres': request.GET,
         'statuts': Lease.STATUT_CHOICES,
+        'agences': queryset_tenant(Agence, request.user).filter(actif=True).order_by('nom'),
         'querystring': querystring_sans_page(request),
     })

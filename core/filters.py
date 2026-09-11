@@ -1,7 +1,7 @@
 import django_filters
 from django_filters import rest_framework as filters
 
-from recouvrement.models import Lease, Contrat, Paiement, ReglePenalite, Penalite, SessionPaiement, \
+from recouvrement.models import Lease, Contrat, Depense, Paiement, ReglePenalite, Penalite, SessionPaiement, \
     PreuvePaiementUSSD, CompteReceptionProprietaire
 
 
@@ -251,6 +251,39 @@ class CompteReceptionProprietaireFilter(filters.FilterSet):
         fields = [
             'operateur',
             'actif',
+        ]
+
+
+class DepenseFilter(filters.FilterSet):
+    # ==========================================
+    # 1. FILTRES MULTIPLES (IN)
+    # ==========================================
+    categorie__in = CharInFilter(field_name='categorie', lookup_expr='in')
+
+    agence_id = filters.NumberFilter(field_name="agence_id")
+    agence_id__in = NumberInFilter(field_name='agence_id', lookup_expr='in')
+    contrat_id = filters.NumberFilter(field_name="contrat_id")
+
+    # ==========================================
+    # 2. RANGES DE DATES (date de la dépense)
+    # ==========================================
+    date_depense_start = filters.DateFilter(field_name="date_depense", lookup_expr='gte')
+    date_depense_end = filters.DateFilter(field_name="date_depense", lookup_expr='lte')
+    date_depense = filters.DateFilter(field_name="date_depense", lookup_expr='exact')
+
+    created_at_start = filters.DateFilter(field_name="created_at__date", lookup_expr='gte')
+    created_at_end = filters.DateFilter(field_name="created_at__date", lookup_expr='lte')
+
+    # ==========================================
+    # 3. FILTRES FINANCIERS
+    # ==========================================
+    montant_min = filters.NumberFilter(field_name="montant", lookup_expr='gte')
+    montant_max = filters.NumberFilter(field_name="montant", lookup_expr='lte')
+
+    class Meta:
+        model = Depense
+        fields = [
+            'categorie',
         ]
 
 

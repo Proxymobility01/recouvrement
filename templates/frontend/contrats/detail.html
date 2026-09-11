@@ -25,6 +25,10 @@
     </div>
     <hr>
     <div class="row">
+      <div class="col-md-3"><strong>Total des dépenses</strong><br>{{ montant_total_depenses }} F</div>
+    </div>
+    <hr>
+    <div class="row">
       <div class="col-md-3"><strong>VIN</strong><br>{{ contrat.vin|default:"—" }}</div>
       <div class="col-md-3"><strong>Immatriculation</strong><br>{{ contrat.immatriculation|default:"—" }}</div>
       <div class="col-md-3"><strong>Période</strong><br>{{ contrat.date_debut }} → {{ contrat.date_fin }}</div>
@@ -130,6 +134,34 @@
     </tr>
     {% empty %}
     <tr><td colspan="5" class="text-muted">Aucun paiement.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<div class="d-flex justify-content-between align-items-center mb-2">
+  <h2 class="h5 mb-0">Dépenses</h2>
+  {% if peut_ajouter_depense %}
+    <button type="button" class="btn btn-sm btn-outline-primary" data-modal-url="{% url 'frontend:depenses-creer' %}?contrat={{ contrat.pk }}">Nouvelle dépense</button>
+  {% endif %}
+</div>
+<table class="table table-sm bg-white">
+  <thead><tr><th>Date</th><th>Catégorie</th><th>Libellé</th><th>Fournisseur</th><th>Montant</th><th></th></tr></thead>
+  <tbody>
+    {% for depense in depenses %}
+    <tr>
+      <td>{{ depense.date_depense|date:"d/m/Y" }}</td>
+      <td>{{ depense.get_categorie_display }}</td>
+      <td>{{ depense.libelle }}</td>
+      <td>{{ depense.fournisseur|default:"—" }}</td>
+      <td>{{ depense.montant }} F</td>
+      <td>
+        {% if peut_modifier_depense %}
+          <button type="button" class="btn btn-sm btn-outline-secondary" data-modal-url="{% url 'frontend:depenses-modifier' depense.pk %}">Modifier</button>
+        {% endif %}
+      </td>
+    </tr>
+    {% empty %}
+    <tr><td colspan="6" class="text-muted">Aucune dépense.</td></tr>
     {% endfor %}
   </tbody>
 </table>

@@ -4,8 +4,9 @@ from django.db.models import Q
 from django.shortcuts import get_object_or_404, redirect, render
 
 from core.exceptions import CustomAPIException
+from core.filters import SessionPaiementFilter
 from frontend.mixins import permission_requise, queryset_tenant, querystring_sans_page
-from recouvrement.models import SessionPaiement
+from recouvrement.models import Agence, SessionPaiement
 from recouvrement.services_ussd import PaiementUSSDService
 
 
@@ -24,12 +25,10 @@ def liste(request):
     """Lecture seule, comme SessionPaiementViewSet : aucune écriture ici."""
     qs = _transactions_accessibles(request.user)
 
-    statut = request.GET.get('statut', '')
-    if statut:
-        qs = qs.filter(statut=statut)
-    canal = request.GET.get('canal', '')
-    if canal:
-        qs = qs.filter(canal=canal)
+    # Statut, canal, agence, plage de date de validation et plage de
+    # montant : déjà supportés par SessionPaiementFilter (utilisé aussi
+    # par l'API).
+    qs = SessionPaiementFilter(request.GET, queryset=qs).qs
 
     recherche = request.GET.get('q', '').strip()
     if recherche:
@@ -39,11 +38,11 @@ def liste(request):
 
     return render(request, 'frontend/transactions/list.html', {
         'page_obj': page,
-        'statut': statut,
-        'canal': canal,
         'recherche': recherche,
+        'filtres': request.GET,
         'statuts': SessionPaiement.STATUT_CHOICES,
         'canaux': SessionPaiement.CANAL_CHOICES,
+        'agences': queryset_tenant(Agence, request.user).filter(actif=True).order_by('nom'),
         'querystring': querystring_sans_page(request),
     })
 

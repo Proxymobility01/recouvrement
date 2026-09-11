@@ -5,9 +5,10 @@ from django.db.models import F, Q
 from rest_framework.exceptions import ValidationError as DRFValidationError
 from django.shortcuts import get_object_or_404, redirect, render
 
+from core.filters import PaiementFilter
 from frontend.mixins import permission_requise, queryset_tenant, querystring_sans_page
 from recouvrement.api.v1.serializers import PaiementSerializer
-from recouvrement.models import Lease, Paiement
+from recouvrement.models import Agence, Lease, Paiement
 
 
 def _paiements_accessibles(user):
@@ -34,21 +35,18 @@ def _leases_payables(user):
 def liste(request):
     qs = _paiements_accessibles(request.user)
 
-    statut = request.GET.get('statut', '')
-    if statut:
-        qs = qs.filter(statut=statut)
-    methode = request.GET.get('methode', '')
-    if methode:
-        qs = qs.filter(methode=methode)
+    # Statut, méthode, agence, plage de date de paiement et plage de montant :
+    # déjà supportés par PaiementFilter (utilisé aussi par l'API).
+    qs = PaiementFilter(request.GET, queryset=qs).qs
 
     page = Paginator(qs.order_by('-created_at'), 25).get_page(request.GET.get('page'))
 
     return render(request, 'frontend/paiements/list.html', {
         'page_obj': page,
-        'statut': statut,
-        'methode': methode,
+        'filtres': request.GET,
         'statuts': Paiement.STATUT_CHOICES,
         'methodes': Paiement.METHODE_CHOICES,
+        'agences': queryset_tenant(Agence, request.user).filter(actif=True).order_by('nom'),
         'querystring': querystring_sans_page(request),
     })
 

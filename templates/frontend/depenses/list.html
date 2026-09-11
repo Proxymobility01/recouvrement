@@ -1,0 +1,81 @@
+{% extends 'frontend/base.html' %}
+{% block titre %}Dépenses{% endblock %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h1 class="h3 mb-0">Dépenses</h1>
+  {% if perms.recouvrement.add_depense %}
+    <button type="button" class="btn btn-primary" data-modal-url="{% url 'frontend:depenses-creer' %}">Nouvelle dépense</button>
+  {% endif %}
+</div>
+
+<form method="get" class="row g-2 mb-3 align-items-end">
+  <div class="col-auto">
+    <label class="form-label small mb-0">Catégorie</label>
+    <select name="categorie" class="form-select">
+      <option value="">Toutes</option>
+      {% for code, libelle in categories %}
+        <option value="{{ code }}" {% if code == filtres.categorie %}selected{% endif %}>{{ libelle }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="col-auto">
+    <label class="form-label small mb-0">Contrat</label>
+    <select name="contrat_id" class="form-select">
+      <option value="">Tous</option>
+      {% for c in contrats %}
+        <option value="{{ c.pk }}" {% if filtres.contrat_id == c.pk|stringformat:"s" %}selected{% endif %}>{{ c.reference }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="col-auto">
+    <label class="form-label small mb-0">Agence</label>
+    <select name="agence_id" class="form-select">
+      <option value="">Toutes</option>
+      {% for a in agences %}
+        <option value="{{ a.pk }}" {% if filtres.agence_id == a.pk|stringformat:"s" %}selected{% endif %}>{{ a.nom }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="col-auto">
+    <label class="form-label small mb-0">Date de la dépense</label>
+    <div class="d-flex align-items-center gap-1">
+      <input type="date" name="date_depense_start" value="{{ filtres.date_depense_start }}" class="form-control form-control-sm">
+      <span class="text-muted small">→</span>
+      <input type="date" name="date_depense_end" value="{{ filtres.date_depense_end }}" class="form-control form-control-sm">
+    </div>
+  </div>
+  <div class="col-auto">
+    <label class="form-label small mb-0">Montant</label>
+    <div class="d-flex align-items-center gap-1">
+      <input type="number" step="0.01" name="montant_min" value="{{ filtres.montant_min }}" class="form-control form-control-sm" placeholder="Min">
+      <input type="number" step="0.01" name="montant_max" value="{{ filtres.montant_max }}" class="form-control form-control-sm" placeholder="Max">
+    </div>
+  </div>
+  <div class="col-auto"><button class="btn btn-outline-secondary" type="submit">Filtrer</button></div>
+  <div class="col-auto"><a href="{% url 'frontend:depenses-liste' %}" class="btn btn-link">Réinitialiser</a></div>
+</form>
+
+<table class="table table-striped bg-white">
+  <thead><tr><th>Date</th><th>Contrat</th><th>Catégorie</th><th>Libellé</th><th>Fournisseur</th><th>Montant</th><th></th></tr></thead>
+  <tbody>
+    {% for depense in page_obj %}
+    <tr>
+      <td>{{ depense.date_depense|date:"d/m/Y" }}</td>
+      <td><a href="{% url 'frontend:contrats-detail' depense.contrat_id %}">{{ depense.contrat.reference }}</a></td>
+      <td>{{ depense.get_categorie_display }}</td>
+      <td>{{ depense.libelle }}</td>
+      <td>{{ depense.fournisseur|default:"—" }}</td>
+      <td>{{ depense.montant }} F</td>
+      <td>
+        {% if peut_modifier %}
+          <button type="button" class="btn btn-sm btn-outline-secondary" data-modal-url="{% url 'frontend:depenses-modifier' depense.pk %}">Modifier</button>
+        {% endif %}
+      </td>
+    </tr>
+    {% empty %}
+    <tr><td colspan="7" class="text-muted text-center">Aucune dépense.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% include 'frontend/_pagination.html' %}
+{% endblock %}

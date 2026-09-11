@@ -1,0 +1,124 @@
+/*
+ * Thème de connexion "recouvrement" — recolore le thème par défaut de
+ * Keycloak (keycloak.v2) aux couleurs de la marque (orange / noir / blanc),
+ * sans toucher aux templates FreeMarker ni à la logique du formulaire.
+ *
+ * Les sélecteurs ci-dessous (#kc-header-wrapper, #kc-form-login, #kc-login,
+ * #username, #password...) sont des `id` posés directement par les
+ * templates Keycloak (login.ftl et consorts) : ils sont stables depuis de
+ * très nombreuses versions, contrairement aux classes PatternFly générées
+ * (pf-v5-c-..., pf-c-...) qui changent parfois d'une version à l'autre.
+ *
+ * Si un élément ne prend pas le style malgré tout (variation mineure selon
+ * la version exacte de Keycloak) : ouvrir la page de connexion réelle,
+ * clic droit > Inspecter sur l'élément concerné, relever sa classe/son id
+ * réel et ajouter une règle ciblée en bas de ce fichier.
+ */
+
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap');
+
+:root {
+  --rc-orange: #FF5A1F;
+  --rc-orange-dark: #E14709;
+  --rc-black: #15130F;
+  --rc-white: #FFFFFF;
+  --rc-gray-50: #F8F6F4;
+  --rc-gray-200: #E6E0D9;
+}
+
+html, body {
+  background: var(--rc-gray-50) !important;
+  font-family: 'Poppins', sans-serif !important;
+  color: var(--rc-black) !important;
+}
+
+/* ==========================================================
+   En-tête : remplace le logo/texte "Keycloak" par défaut
+   ========================================================== */
+#kc-header-wrapper,
+.kc-logo-text {
+  background-image: url('../img/logo.svg') !important;
+  background-repeat: no-repeat !important;
+  background-position: center !important;
+  background-size: contain !important;
+  width: 64px !important;
+  height: 64px !important;
+  margin: 0 auto 1rem !important;
+  text-indent: -9999px !important;
+  overflow: hidden !important;
+}
+
+/* ==========================================================
+   Carte de connexion
+   ========================================================== */
+.card-pf,
+.login-pf-page .card-pf,
+[class*="-c-card"] {
+  border-radius: 16px !important;
+  border: 1px solid var(--rc-gray-200) !important;
+  box-shadow: 0 8px 24px rgba(21, 19, 15, 0.08) !important;
+}
+
+#kc-page-title,
+.login-pf-header h1,
+[class*="-c-title"] {
+  font-family: 'Poppins', sans-serif !important;
+  font-weight: 600 !important;
+  color: var(--rc-black) !important;
+}
+
+/* ==========================================================
+   Champs du formulaire
+   ========================================================== */
+#username,
+#password,
+input[type="text"],
+input[type="password"],
+input[type="email"] {
+  border-radius: 8px !important;
+  border: 1px solid var(--rc-gray-200) !important;
+}
+
+#username:focus,
+#password:focus,
+input[type="text"]:focus,
+input[type="password"]:focus,
+input[type="email"]:focus {
+  border-color: var(--rc-orange) !important;
+  box-shadow: 0 0 0 0.2rem rgba(255, 90, 31, 0.25) !important;
+}
+
+/* ==========================================================
+   Bouton principal ("Se connecter")
+   ========================================================== */
+#kc-login,
+#kc-form-buttons input[type="submit"],
+button[type="submit"],
+[class*="-c-button"][class*="-m-primary"] {
+  background-color: var(--rc-orange) !important;
+  border-color: var(--rc-orange) !important;
+  color: var(--rc-white) !important;
+  border-radius: 8px !important;
+  font-weight: 600 !important;
+}
+
+#kc-login:hover,
+#kc-form-buttons input[type="submit"]:hover,
+button[type="submit"]:hover,
+[class*="-c-button"][class*="-m-primary"]:hover {
+  background-color: var(--rc-orange-dark) !important;
+  border-color: var(--rc-orange-dark) !important;
+}
+
+/* ==========================================================
+   Liens ("Mot de passe oublié ?", etc.)
+   ========================================================== */
+a,
+#kc-form-options a {
+  color: var(--rc-orange) !important;
+}
+
+a:hover,
+#kc-form-options a:hover {
+  color: var(--rc-orange-dark) !important;
+}

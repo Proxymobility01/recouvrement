@@ -7,8 +7,8 @@ from rest_framework import serializers
 from decimal import Decimal
 from django_q.models import Schedule
 from core.utils import format_phone_cm
-from recouvrement.models import Agence, CompteReceptionProprietaire, Contrat, Lease, Paiement, TypeContrat, Parametre, \
-    PreuvePaiementUSSD, Proprietaire, ReglePenalite, Penalite, SessionPaiement, RegleGenerationLease
+from recouvrement.models import Agence, CompteReceptionProprietaire, Contrat, Depense, Lease, Paiement, TypeContrat, \
+    Parametre, PreuvePaiementUSSD, Proprietaire, ReglePenalite, Penalite, SessionPaiement, RegleGenerationLease
 
 
 class DateSeulementEnLectureMixin:
@@ -398,6 +398,12 @@ class ContratSerializer(
         read_only=True,
         default=None,
     )
+    # Alimenté par une annotation Sum('depenses__montant') côté ContratViewSet.
+    # `default` permet un repli à 0 si le queryset n'est pas annoté (ex:
+    # instance fraîchement créée hors de ce viewset).
+    montant_total_depenses = serializers.DecimalField(
+        max_digits=12, decimal_places=2, read_only=True, default=Decimal('0.00'),
+    )
     champs_datetime_en_date = ('prochaine_echeance',)
 
     class Meta:
@@ -408,6 +414,7 @@ class ContratSerializer(
             'proprietaire', 'proprietaire_nom_complet',
             'enregistre_par', 'enregistre_par_nom_complet', 'chauffeur_nom_complet',
             'montant_total', 'montant_restant', 'montant_paye', 'montant_par_paiement',
+            'montant_total_depenses',
             'frequence', 'date_debut', 'date_fin', 'prochaine_echeance',
             'statut', 'specificites', 'regle_generation',
             'config_paiement', 'created_at', 'updated_at'
@@ -1267,6 +1274,47 @@ class PaiementSerializer(serializers.ModelSerializer):
                 contrat.save()
 
         return super().update(instance, validated_data)
+
+
+class DepenseSerializer(serializers.ModelSerializer):
+    contrat = serializers.PrimaryKeyRelatedField(queryset=Contrat.objects.all())
+    contrat_reference = serializers.CharField(source='contrat.reference', read_only=True)
+    agence = serializers.PrimaryKeyRelatedField(read_only=True)
+    agence_nom = serializers.CharField(source='agence.nom', read_only=True, default=None)
+    enregistre_par_nom_complet = serializers.CharField(source='enregistre_par.nom_complet', read_only=True)
+
+    class Meta:
+        model = Depense
+        fields = [
+            'id', 'contrat', 'contrat_reference', 'categorie', 'libelle',
+            'description', 'montant', 'date_depense', 'fournisseur',
+            'agence', 'agence_nom',
+            'enregistre_par', 'enregistre_par_nom_complet',
+            'created_at', 'updated_at',
+        ]
+        read_only_fields = [
+            'agence', 'agence_nom', 'enregistre_par',
+            'enregistre_par_nom_complet', 'created_at', 'updated_at',
+        ]
+
+    def validate_contrat(self, value):
+        request = self.context.get('request')
+        if (
+            request
+            and not request.user.is_superuser
+            and value.compte_id != request.user.compte_id
+        ):
+            raise serializers.ValidationError("Contrat introuvable.")
+        return value
+
+    def create(self, validated_data):
+        # Le compte_id d'une dépense suit toujours celui de son contrat,
+        # jamais celui de l'appelant : un superuser peut légitimement
+        # enregistrer une dépense sur le contrat d'un partenaire dont il
+        # n'est pas lui-même membre (son propre compte_id n'a alors aucun
+        # rapport avec le contrat sélectionné).
+        validated_data['compte_id'] = validated_data['contrat'].compte_id
+        return super().create(validated_data)
 
 
 class ParametreSerializer(serializers.ModelSerializer):
