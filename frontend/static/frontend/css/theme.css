@@ -1,0 +1,168 @@
+/* Thème Recouvrement — surcharge des variables Bootstrap 5, pas de rebuild. */
+
+:root {
+  --rc-orange: #FF5A1F;
+  --rc-orange-rgb: 255, 90, 31;
+  --rc-orange-dark: #E14709;
+  --rc-orange-soft: #FFE9DE;
+  --rc-black: #15130F;
+  --rc-black-rgb: 21, 19, 15;
+  --rc-white: #FFFFFF;
+  --rc-gray-50: #F8F6F4;
+  --rc-gray-100: #F1EDE9;
+  --rc-gray-200: #E6E0D9;
+  --rc-gray-600: #6E655C;
+
+  --bs-primary: var(--rc-orange);
+  --bs-primary-rgb: var(--rc-orange-rgb);
+  --bs-link-color: var(--rc-orange);
+  --bs-link-color-rgb: var(--rc-orange-rgb);
+  --bs-link-hover-color: var(--rc-orange-dark);
+  --bs-link-hover-color-rgb: 225, 71, 9;
+  --bs-body-bg: var(--rc-gray-50);
+  --bs-body-color: var(--rc-black);
+  --bs-border-color: var(--rc-gray-200);
+  --bs-border-color-translucent: var(--rc-gray-200);
+}
+
+body {
+  font-family: 'Poppins', 'Segoe UI', sans-serif;
+}
+
+h1, h2, h3, h4, h5, .navbar-brand {
+  font-weight: 600;
+}
+
+a {
+  color: var(--rc-orange);
+}
+
+/* Boutons -------------------------------------------------------------- */
+
+.btn {
+  border-radius: .6rem;
+  font-weight: 500;
+}
+
+.btn-primary {
+  --bs-btn-bg: var(--rc-orange);
+  --bs-btn-border-color: var(--rc-orange);
+  --bs-btn-hover-bg: var(--rc-orange-dark);
+  --bs-btn-hover-border-color: var(--rc-orange-dark);
+  --bs-btn-active-bg: var(--rc-orange-dark);
+  --bs-btn-active-border-color: var(--rc-orange-dark);
+  --bs-btn-disabled-bg: var(--rc-orange);
+  --bs-btn-disabled-border-color: var(--rc-orange);
+  --bs-btn-focus-shadow-rgb: var(--rc-orange-rgb);
+}
+
+.btn-outline-primary {
+  --bs-btn-color: var(--rc-orange);
+  --bs-btn-border-color: var(--rc-orange);
+  --bs-btn-hover-bg: var(--rc-orange);
+  --bs-btn-hover-border-color: var(--rc-orange);
+  --bs-btn-active-bg: var(--rc-orange);
+  --bs-btn-active-border-color: var(--rc-orange);
+  --bs-btn-focus-shadow-rgb: var(--rc-orange-rgb);
+}
+
+.btn-link {
+  color: var(--rc-black);
+  text-decoration: none;
+}
+.btn-link:hover {
+  color: var(--rc-orange);
+}
+
+/* Navbar ----------------------------------------------------------------*/
+
+.navbar-rc {
+  background-color: var(--rc-black) !important;
+}
+.navbar-rc .navbar-brand {
+  color: var(--rc-white);
+  display: flex;
+  align-items: center;
+  gap: .55rem;
+}
+.navbar-rc .nav-link {
+  color: rgba(255, 255, 255, .72);
+}
+.navbar-rc .nav-link:hover,
+.navbar-rc .nav-link.active {
+  color: var(--rc-orange);
+}
+.navbar-rc .navbar-text {
+  color: rgba(255, 255, 255, .6) !important;
+}
+
+.rc-logo-mark {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+}
+
+/* Cartes, tableaux, badges ----------------------------------------------*/
+
+.card {
+  border: 1px solid var(--rc-gray-200);
+  border-radius: .9rem;
+  box-shadow: 0 2px 14px rgba(21, 19, 15, .05);
+}
+
+.table {
+  --bs-table-bg: transparent;
+}
+.table thead th {
+  text-transform: uppercase;
+  font-size: .72rem;
+  letter-spacing: .04em;
+  color: var(--rc-gray-600);
+  border-bottom-width: 1px;
+}
+
+.badge {
+  border-radius: .5rem;
+  font-weight: 500;
+  padding: .4em .65em;
+}
+.badge.bg-success { background-color: #1F9254 !important; }
+.badge.bg-secondary { background-color: var(--rc-gray-600) !important; }
+.badge.bg-light.text-dark { background-color: var(--rc-gray-100) !important; }
+
+.form-control:focus,
+.form-select:focus {
+  border-color: var(--rc-orange);
+  box-shadow: 0 0 0 .2rem rgba(var(--rc-orange-rgb), .18);
+}
+
+/* Modals ------------------------------------------------------------------*/
+
+.modal-content {
+  border-radius: 1rem;
+  border: none;
+  box-shadow: 0 12px 40px rgba(21, 19, 15, .18);
+}
+.modal-header {
+  border-bottom: 1px solid var(--rc-gray-100);
+}
+.modal-footer {
+  border-top: 1px solid var(--rc-gray-100);
+}
+
+.alert {
+  border-radius: .75rem;
+  border: none;
+}
+.alert-danger {
+  background-color: #FDEAEA;
+  color: #9C2A2A;
+}
+.alert-success {
+  background-color: #E6F5EC;
+  color: #17663C;
+}
+.alert-warning {
+  background-color: var(--rc-orange-soft);
+  color: #8C3A12;
+}

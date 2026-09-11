@@ -18,7 +18,9 @@ db.sqlite3
 db.sqlite3-journal
 media/
 staticfiles/
-static/
+# Ignore uniquement un éventuel dossier statique généré à la racine.
+# Les sources des applications (ex. frontend/static/) doivent être versionnées.
+/static/
 
 # --- Sécurité & Environnement (CRITIQUE) ---
 .env
