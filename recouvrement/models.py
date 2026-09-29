@@ -2,6 +2,7 @@ import secrets
 from django.db.models import Q
 from decimal import Decimal
 from django.contrib.postgres.indexes import GinIndex
+from django.core.exceptions import ValidationError
 from django.core.validators import MinValueValidator
 from django.db import models, transaction
 from django.utils import timezone
@@ -195,6 +196,20 @@ class Contrat(BaseModel):
     def __str__(self):
         return f"Contrat {self.id} - {self.nom_complet}"
 
+    def clean(self):
+        super().clean()
+        if (
+            self.statut == self.STATUT_SOLDE
+            and self.montant_restant is not None
+            and self.montant_restant > 0
+        ):
+            raise ValidationError({
+                'statut': (
+                    "Un contrat ne peut pas être soldé tant que son montant "
+                    "restant est supérieur à zéro."
+                ),
+            })
+
 
     def generer_reference(self):
         """
@@ -231,7 +246,9 @@ class Contrat(BaseModel):
 
             # On formate sur 5 chiffres (ex: 1 devient 00001)
             return f"{prefix}{nouvelle_sequence:05d}"
+
     def save(self, *args, **kwargs):
+        self.clean()
         if not self.reference:
             self.reference = self.generer_reference()
         if self.nom_complet:

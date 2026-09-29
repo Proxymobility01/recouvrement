@@ -193,6 +193,26 @@ class ContratSerializer(DateSeulementEnLectureMixin, serializers.ModelSerializer
         montant_total = attrs.get('montant_total', getattr(self.instance, 'montant_total', None))
         montant_par_paiement = attrs.get('montant_par_paiement', getattr(self.instance, 'montant_par_paiement', None))
         montant_paye = attrs.get('montant_paye', getattr(self.instance, 'montant_paye', 0))
+        statut = attrs.get(
+            'statut',
+            getattr(self.instance, 'statut', Contrat.STATUT_ACTIF),
+        )
+
+        montant_restant = max(
+            Decimal('0.00'),
+            (montant_total or Decimal('0.00'))
+            - (montant_paye or Decimal('0.00')),
+        )
+        if (
+            statut == Contrat.STATUT_SOLDE
+            and montant_restant > 0
+        ):
+            raise serializers.ValidationError({
+                'statut': (
+                    "Un contrat ne peut pas être soldé tant que son montant "
+                    "restant est supérieur à zéro."
+                ),
+            })
 
         parent = attrs.get('parent', getattr(self.instance, 'parent', None))
         chauffeur = attrs.get('chauffeur', getattr(self.instance, 'chauffeur', None))
