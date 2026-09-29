@@ -493,6 +493,113 @@ class AdministrationGenerationLeaseTests(TestCase):
         )
 
 
+class ValidationStatutContratSoldeTests(TestCase):
+    compte_id = 77
+
+    def setUp(self):
+        self.chauffeur = CustomUser.objects.create(
+            keycloak_id='driver-validation-statut-solde',
+            compte_id=self.compte_id,
+            nom_complet='Chauffeur validation statut',
+            is_active=True,
+        )
+        self.type_contrat = TypeContrat.objects.create(
+            compte_id=self.compte_id,
+            libelle='Véhicule validation statut',
+            code='VEH-STATUT',
+            est_principal=True,
+        )
+        self.contrat = Contrat.objects.create(
+            compte_id=self.compte_id,
+            chauffeur=self.chauffeur,
+            enregistre_par=self.chauffeur,
+            type_contrat=self.type_contrat,
+            nom_complet=self.chauffeur.nom_complet,
+            immatriculation='STATUT-001',
+            vin='STATUTSOLDE000001',
+            montant_total=Decimal('1000.00'),
+            montant_restant=Decimal('1000.00'),
+            montant_par_paiement=Decimal('100.00'),
+            montant_paye=Decimal('0.00'),
+            frequence=Contrat.JOURNALIER,
+            date_debut=date(2026, 9, 1),
+            date_fin=date(2026, 12, 31),
+            prochaine_echeance=occurrence_aware(2026, 9, 1, 2),
+            statut=Contrat.STATUT_ACTIF,
+        )
+
+    def test_modele_refuse_solde_avec_un_montant_restant(self):
+        self.contrat.statut = Contrat.STATUT_SOLDE
+
+        with self.assertRaises(ValidationError) as contexte:
+            self.contrat.full_clean()
+
+        self.assertIn('statut', contexte.exception.message_dict)
+
+    def test_ecriture_orm_refuse_solde_avec_un_montant_restant(self):
+        self.contrat.statut = Contrat.STATUT_SOLDE
+
+        with self.assertRaises(ValidationError):
+            self.contrat.save(update_fields=['statut'])
+
+    def test_api_refuse_solde_avec_un_montant_restant(self):
+        serializer = ContratSerializer(
+            self.contrat,
+            data={'statut': Contrat.STATUT_SOLDE},
+            partial=True,
+        )
+
+        self.assertFalse(serializer.is_valid())
+        self.assertIn('statut', serializer.errors)
+
+    def test_api_autorise_solde_quand_le_contrat_est_entierement_paye(self):
+        serializer = ContratSerializer(
+            self.contrat,
+            data={
+                'montant_paye': '1000.00',
+                'statut': Contrat.STATUT_SOLDE,
+            },
+            partial=True,
+        )
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        contrat = serializer.save()
+        self.assertEqual(contrat.statut, Contrat.STATUT_SOLDE)
+        self.assertEqual(contrat.montant_restant, Decimal('0.00'))
+
+    def test_admin_refuse_solde_avec_un_montant_restant(self):
+        formulaire = ContratAdminForm(
+            data={
+                'compte_id': self.compte_id,
+                'chauffeur': self.chauffeur.id,
+                'enregistre_par': self.chauffeur.id,
+                'type_contrat': self.type_contrat.id,
+                'parent': '',
+                'nom_complet': self.contrat.nom_complet,
+                'reference': self.contrat.reference,
+                'immatriculation': self.contrat.immatriculation,
+                'vin': self.contrat.vin,
+                'specificites': '',
+                'montant_total': '1000.00',
+                'montant_restant': '1000.00',
+                'montant_par_paiement': '100.00',
+                'montant_paye': '0.00',
+                'frequence': Contrat.JOURNALIER,
+                'date_debut': '2026-09-01',
+                'date_fin': '2026-12-31',
+                'prochaine_echeance': '2026-09-01 02:00:00',
+                'statut': Contrat.STATUT_SOLDE,
+                'regle_penalite': '',
+                'regle_generation': '',
+                'config_paiement': '',
+            },
+            instance=self.contrat,
+        )
+
+        self.assertFalse(formulaire.is_valid())
+        self.assertIn('statut', formulaire.errors)
+
+
 class GenerationLeasesTests(TestCase):
     compte_id = 77
 
